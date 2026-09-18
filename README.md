@@ -1,7 +1,7 @@
 # KybernaAgentKit
 
 The Kyberna Agent SDK for Swift. It drives Claude Code as an agent engine over its stream-json protocol, the same
-protocol Anthropic's Python and TypeScript Agent SDKs use, so a Swift application gets the Claude Code agent loop,
+protocol the Python and TypeScript Agent SDKs use, so a Swift application gets the Claude Code agent loop,
 tools, hooks, permissions, sessions and MCP without implementing the loop itself. Typed `Codable` wire types, a
 transport that runs the CLI and frames its output, a session with hooks, permission callbacks and steering, an
 engine protocol, and a test kit that replays recorded conversations through a fake CLI so tests need no network
@@ -61,10 +61,10 @@ directory.
 
 ## Authentication
 
-Anthropic's terms allow a third-party product to use Claude Code's claude.ai login only on the developer's own
-machine. A product for other people authenticates with an Anthropic API key (`ANTHROPIC_API_KEY` in
-`SessionOptions.env`) or a cloud provider's credentials (Bedrock, Vertex AI, Foundry, through the CLI's own
-environment variables). The SDK passes an allowlisted environment to the CLI and never reads credentials itself.
+The SDK carries no credentials of its own. It passes an allowlisted environment to the Claude Code process
+(`SessionOptions.env`, `SessionOptions.inheritedEnvironmentKeys`), so the CLI authenticates the way it is
+configured on that machine: `ANTHROPIC_API_KEY`, a cloud provider's variables, or its own login. Which of these
+your product may use is a question for Anthropic's documentation and terms, not for this package.
 
 ## Claude Code versions
 
@@ -95,11 +95,9 @@ conversation against the real CLI, and scrub the home directory, user name and e
 
 ## Naming
 
-"Claude Agent" is Anthropic's permitted descriptor for products built on its Agent SDK; "Claude Code" is not
-permitted in a third-party product name. This package is named for Kyberna, the product it belongs to, in the
-same way Anthropic names its SDKs for Claude; the engine keeps its name in the types (`ClaudeSession`,
-`ClaudeCodeEngine`).
+The package is named for Kyberna, the product it belongs to; the engine keeps its own name in the types
+(`ClaudeSession`, `ClaudeCodeEngine`). Claude and Claude Code are Anthropic's names.
 
 ## License
 
-MIT License; see `LICENSE`. Use of Claude Code and the Anthropic API is governed by Anthropic's terms.
+MIT License; see `LICENSE`. It covers this package only; Claude Code and the Anthropic API are Anthropic's products with their own licenses and terms.

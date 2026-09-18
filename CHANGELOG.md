@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.1 (2026-09-17)
+
+README only: removed statements that characterised Anthropic's terms; authentication is described as what the SDK passes through, and the terms are left to Anthropic's own documentation.
+
 ## 0.1.0 (2026-09-17, first public release)
 
 Published from the Kyberna repository into this one, with the wire document and fixtures as the `protocol` submodule. The package and module are `KybernaAgentKit` (earlier working name `ClaudeAgentKit`), following the convention Anthropic uses for its own Agent SDKs: the vendor's product in the package name, the engine in the type names, so `ClaudeSession` and `ClaudeCodeEngine` name the Claude Code engine. MIT.
