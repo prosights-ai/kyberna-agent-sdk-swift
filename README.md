@@ -96,7 +96,7 @@ conversation against the real CLI, and scrub the home directory, user name and e
 ## Naming
 
 The package is named for Kyberna, the product it belongs to; the engine keeps its own name in the types
-(`ClaudeSession`, `ClaudeCodeEngine`). Claude and Claude Code are Anthropic's names.
+(`ClaudeSession`, `ClaudeCodeEngine`). Claude and Claude Code belong to Anthropic.
 
 ## License
 
