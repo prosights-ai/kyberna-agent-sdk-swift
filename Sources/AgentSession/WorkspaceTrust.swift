@@ -6,7 +6,7 @@ import AgentProtocol
 /// The CLI asks "do you trust the files in this folder" the first time it runs interactively in a directory and
 /// records the answer as `projects[<path>].hasTrustDialogAccepted` in `~/.claude.json`. Until then it ignores the
 /// directory's `.claude/settings.json` permission rules ("this workspace has not been trusted", observed 2.1.271).
-/// Home-directory trust is never persisted (docs: Security, Trust verification). Anthropic's own hosted runner
+/// Home-directory trust is never persisted (docs: Security, Trust verification). the CLI's own hosted runner
 /// pre-records trust by writing that same flag for the path, its NFC-normalized form, and its realpath, with file
 /// mode 0600 (observed in the 2.1.271 binary). This type does exactly that: a host presents its own dialog, and on
 /// acceptance calls `record`. Nothing else changes; the CLI still decides what trust unlocks.

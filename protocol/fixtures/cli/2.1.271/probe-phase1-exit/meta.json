@@ -1,0 +1,9 @@
+{
+  "scenario": "probe-phase1-exit",
+  "claude_code_version": "2.1.271",
+  "recorded": "2026-09-15",
+  "recorder": "kyb probe phase1-exit (SessionOptions.recordDirectory), console profile, pinned engine",
+  "cwd_placeholder": "/private/var/folders/.../kyb-phase1-<uuid>",
+  "description": "Plan Phase 1 exit test on the real CLI: a turn edits notes.txt twice; after approving the first Edit the host pauses (the second can_use_tool waits), steers while paused (queued), resumes; the model does both edits plus the steered third; rewind_files to the turn's user message uuid restores the file. Verified: ALPHA/BETA/steered present, then original content after rewind.",
+  "scrubbed": ["home directory -> /Users/USER", "macOS username -> USER"]
+}

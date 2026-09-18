@@ -1,0 +1,5 @@
+{"request":{"hooks":{"PostToolUse":[{"hookCallbackIds":["hook_1"],"matcher":null}],"PreToolUse":[{"hookCallbackIds":["hook_0"],"matcher":"Bash"}]},"subtype":"initialize"},"request_id":"req_1_20412AFF","type":"control_request"}
+{"message":{"content":"Run `ls -1 *.py` with Bash, then try `rm -f /tmp/does-not-exist` with Bash. Report what happened to each in one line.","role":"user"},"parent_tool_use_id":null,"session_id":"","type":"user"}
+{"response":{"request_id":"380fe8cf-a765-4832-baf6-ad63f5803698","response":{},"subtype":"success"},"type":"control_response"}
+{"response":{"request_id":"912597d7-ea97-4646-b819-a34b025d61a5","response":{"hookSpecificOutput":{"additionalContext":"Host note: Bash completed.","hookEventName":"PostToolUse"}},"subtype":"success"},"type":"control_response"}
+{"response":{"request_id":"933eb4d8-ed2e-41fb-8244-e39caf4a694f","response":{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"rm is blocked by the host"}},"subtype":"success"},"type":"control_response"}

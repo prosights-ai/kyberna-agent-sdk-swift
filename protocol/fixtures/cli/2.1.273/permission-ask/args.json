@@ -1,0 +1,20 @@
+[
+  "--output-format",
+  "stream-json",
+  "--verbose",
+  "--input-format",
+  "stream-json",
+  "--append-system-prompt",
+  "Be terse.",
+  "--allowedTools",
+  "Read",
+  "--max-turns",
+  "8",
+  "--model",
+  "haiku",
+  "--permission-prompt-tool",
+  "stdio",
+  "--permission-mode",
+  "default",
+  "--no-session-persistence"
+]

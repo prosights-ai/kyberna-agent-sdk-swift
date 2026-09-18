@@ -1,0 +1,13 @@
+{
+  "scenario": "mcp-tool-call",
+  "claude_code_version": "2.1.271",
+  "recorded": "2026-09-14",
+  "recorder": "agent-sdk-test/swift-loop/recorder/main.swift with ClaudeSession.recordDirectory",
+  "cwd_placeholder": "/Users/USER/Library/CloudStorage/OneDrive-Personal/Claude/agent-sdk-test",
+  "description": "In-process MCP server \"checker\" declared as type sdk; JSON-RPC initialize, tools/list, tools/call over mcp_message control requests (ToolSearch loads the deferred tool first).",
+  "scrubbed": [
+    "home directory -> /Users/USER",
+    "email addresses -> user@example.com",
+    "macOS username -> USER"
+  ]
+}

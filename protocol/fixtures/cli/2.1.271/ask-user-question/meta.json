@@ -1,0 +1,13 @@
+{
+  "scenario": "ask-user-question",
+  "claude_code_version": "2.1.271",
+  "recorded": "2026-09-14",
+  "recorder": "agent-sdk-test/swift-loop/recorder/main.swift with ClaudeSession.recordDirectory",
+  "cwd_placeholder": "/Users/USER/Library/CloudStorage/OneDrive-Personal/Claude/agent-sdk-test",
+  "description": "AskUserQuestion arrives as can_use_tool; host answers via updatedInput {questions, answers}.",
+  "scrubbed": [
+    "home directory -> /Users/USER",
+    "email addresses -> user@example.com",
+    "macOS username -> USER"
+  ]
+}

@@ -1,0 +1,9 @@
+[
+  "--output-format",
+  "stream-json",
+  "--verbose",
+  "--input-format",
+  "stream-json",
+  "--max-turns",
+  "2"
+]

@@ -1,0 +1,13 @@
+{
+  "scenario": "interrupt",
+  "claude_code_version": "2.1.271",
+  "recorded": "2026-09-14",
+  "recorder": "agent-sdk-test/swift-loop/recorder/main.swift with ClaudeSession.recordDirectory",
+  "cwd_placeholder": "/Users/USER/Library/CloudStorage/OneDrive-Personal/Claude/agent-sdk-test",
+  "description": "interrupt control request sent mid-turn (several times, from inside the message loop); result subtype error_during_execution.",
+  "scrubbed": [
+    "home directory -> /Users/USER",
+    "email addresses -> user@example.com",
+    "macOS username -> USER"
+  ]
+}

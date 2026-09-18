@@ -1,0 +1,14 @@
+{
+  "scenario": "permission-ask",
+  "claude_code_version": "2.1.272",
+  "recorded": "2026-09-15",
+  "recorder": "kyb record (Sources/kyb/main.swift, Scenarios.all) with ClaudeSession.recordDirectory",
+  "model": "haiku",
+  "cwd_placeholder": "/tmp/claude-501/rec-2.1.272",
+  "description": "Edit requested in default permission mode; can_use_tool answered allow.",
+  "scrubbed": [
+    "home directory -> /Users/USER",
+    "email addresses -> user@example.com",
+    "macOS username -> USER"
+  ]
+}

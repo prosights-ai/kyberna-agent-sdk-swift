@@ -1,0 +1,13 @@
+[
+  "--output-format",
+  "stream-json",
+  "--verbose",
+  "--input-format",
+  "stream-json",
+  "--append-system-prompt",
+  "Be terse.",
+  "--allowedTools",
+  "Read,Glob",
+  "--max-turns",
+  "8"
+]

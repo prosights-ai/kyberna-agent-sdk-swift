@@ -2,9 +2,9 @@
 import PackageDescription
 
 // KybernaAgentKit: the Kyberna Agent SDK for Swift. Its engine drives Claude Code over the stream-json protocol,
-// which makes it the Swift peer of Anthropic's Python and TypeScript Agent SDKs; the engine-neutral layer
+// which makes it the Swift peer of the Python and TypeScript Agent SDKs; the engine-neutral layer
 // (AgentEngine, SwiftTool, Message, the test kit) is what further engines build on. Zero non-Apple dependencies.
-// The wire document and the recorded fixtures every port reads live in the `protocol` submodule.
+// The wire document and the recorded fixtures live in the `protocol` folder.
 let settings: [SwiftSetting] = [
     .enableUpcomingFeature("StrictConcurrency"),
 ]

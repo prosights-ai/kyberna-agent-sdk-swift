@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.2 (2026-09-17)
+
+The wire document and fixtures moved into this repository as the `protocol` folder; no submodule, so `git clone` and SwiftPM resolution need nothing else. Comments no longer describe another vendor's software in our voice.
+
 ## 0.1.1 (2026-09-17)
 
 README only: removed statements that characterised Anthropic's terms; authentication is described as what the SDK passes through, and the terms are left to Anthropic's own documentation.

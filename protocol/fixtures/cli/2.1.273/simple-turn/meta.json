@@ -1,0 +1,14 @@
+{
+  "scenario": "simple-turn",
+  "claude_code_version": "2.1.273",
+  "recorded": "2026-09-15",
+  "recorder": "kyb record (Sources/kyb/main.swift, Scenarios.all) with ClaudeSession.recordDirectory",
+  "model": "haiku",
+  "cwd_placeholder": "/tmp/claude-501/rec-2.1.272",
+  "description": "One user turn; Read tool auto-approved; result success.",
+  "scrubbed": [
+    "home directory -> /Users/USER",
+    "email addresses -> user@example.com",
+    "macOS username -> USER"
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "scenario": "probe-steer-now",
+  "claude_code_version": "2.1.270",
+  "recorded": "2026-09-14",
+  "recorder": "kyb probe steer-now",
+  "description": "steerNow: a 45 s Bash command was running; at +6 s the host sent an interrupt control request, the CLI rejected the running tool (tool_result is_error, user-rejected) and ended the turn with error_during_execution; the host then sent the new instruction, which ran as the next turn and finished at +9 s. The child python process did not survive.",
+  "scrubbed": [
+    "home directory -> /Users/USER",
+    "macOS username -> USER",
+    "email addresses -> user@example.com"
+  ]
+}

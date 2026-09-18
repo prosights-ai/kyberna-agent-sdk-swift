@@ -80,16 +80,15 @@ recorded versions are in `protocol/wire-protocol.md`, section 9.
 ## Tests and fixtures
 
 ```bash
-git clone --recurse-submodules https://github.com/prosights-ai/kyberna-agent-sdk-swift
+git clone https://github.com/prosights-ai/kyberna-agent-sdk-swift
 cd kyberna-agent-sdk-swift
 swift build
 swift test
 ```
 
-The `protocol` submodule ([kyberna-agent-protocol](https://github.com/prosights-ai/kyberna-agent-protocol)) holds
-the wire document and the recorded fixtures, one copy for every language the SDK is ported to; `AgentTestKit`
-copies the fixtures into its bundle and reaches them through `Fixtures.root`, `Fixtures.cli(version)` and
-`Fixtures.scenario(name, version)`. Recording your own: set `SessionOptions.recordDirectory`, run the
+The `protocol` folder holds the wire document and the recorded fixtures; `AgentTestKit` copies the fixtures into
+its bundle and reaches them through `Fixtures.root`, `Fixtures.cli(version)` and `Fixtures.scenario(name, version)`.
+Recording your own: set `SessionOptions.recordDirectory`, run the
 conversation against the real CLI, and scrub the home directory, user name and e-mail addresses before committing
 (`docs/decisions/0003`).
 

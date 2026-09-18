@@ -1,0 +1,12 @@
+{
+  "scenario": "probe-steer-mid-turn",
+  "claude_code_version": "2.1.270",
+  "recorded": "2026-09-13",
+  "recorder": "kyb probe (CLITransport recordDirectory)",
+  "description": "Phase 1 probe: user message sent 5 s into a turn while a 15 s Bash command ran; delivered at the next model call after that tool, honored before the answer, within the same turn (num_turns 4, one result).",
+  "scrubbed": [
+    "home directory -> /Users/USER",
+    "macOS username -> USER",
+    "email addresses -> user@example.com"
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "scenario": "probe-hold-permission-150s",
+  "claude_code_version": "2.1.270",
+  "recorded": "2026-09-13",
+  "recorder": "kyb probe (CLITransport recordDirectory)",
+  "description": "Phase 1 probe: Edit not allowed, permissionMode default; host holds the can_use_tool reply for 150 s (CLI waited 160 s wall-clock, no timeout), then allows; Edit ran and the turn succeeded. Total 172 s.",
+  "scrubbed": [
+    "home directory -> /Users/USER",
+    "macOS username -> USER",
+    "email addresses -> user@example.com"
+  ]
+}

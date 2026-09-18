@@ -1,0 +1,2 @@
+{"request":{"hooks":null,"subtype":"initialize"},"request_id":"req_1_0FB04361","type":"control_request"}
+{"type":"user","session_id":"","message":{"role":"user","content":"Reply with the single word ok."},"parent_tool_use_id":null}

@@ -1,0 +1,12 @@
+{
+  "scenario": "auth-failed",
+  "claude_code_version": "2.1.271",
+  "recorded": "2026-09-14",
+  "recorder": "pinned binary driven directly with CLAUDE_CODE_OAUTH_TOKEN set to an invalid value (test plan T5, negative case); the initialize control_request/control_response pair was copied from simple-turn so the fake CLI can serve the SDK handshake",
+  "cwd_placeholder": "/Users/USER/Developer/Kyberna",
+  "description": "Login unusable: init still arrives (apiKeySource none), two api_retry system lines, then an assistant text and a result with subtype success but is_error true and result 'Not logged in \u00b7 Please run /login'. The CLI exits 1.",
+  "scrubbed": [
+    "home directory -> /Users/USER",
+    "macOS username -> USER"
+  ]
+}
