@@ -1,0 +1,3 @@
+import AgentTestKit
+
+FakeCLIMain.run()
