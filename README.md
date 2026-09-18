@@ -74,8 +74,7 @@ your product may use is a question for Anthropic's documentation and terms, not 
 
 At start the session runs `claude --version`: below `SessionOptions.minimumClaudeCodeVersion` it sets
 `versionWarning` and continues; when `allowedClaudeCodeVersions` is set, any other version throws before anything
-starts. The wire types ignore unknown fields, so a newer CLI usually works untouched; protocol deltas between the
-recorded versions are in `protocol/wire-protocol.md`, section 9.
+starts. The wire types ignore unknown fields, so a newer CLI usually works untouched.
 
 ## Tests and fixtures
 
@@ -86,11 +85,11 @@ swift build
 swift test
 ```
 
-The `protocol` folder holds the wire document and the recorded fixtures; `AgentTestKit` copies the fixtures into
-its bundle and reaches them through `Fixtures.root`, `Fixtures.cli(version)` and `Fixtures.scenario(name, version)`.
-Recording your own: set `SessionOptions.recordDirectory`, run the
-conversation against the real CLI, and scrub the home directory, user name and e-mail addresses before committing
-(`docs/decisions/0003`).
+`protocol/fixtures/cli/<claude-code-version>/<scenario>/` holds the recorded conversations (`args.json`,
+`stdin.jsonl`, `stdout.jsonl`, `meta.json`) that `AgentTestKit` copies into its bundle and reaches through
+`Fixtures.root`, `Fixtures.cli(version)` and `Fixtures.scenario(name, version)`. The recordings are scrubbed of the
+home directory, user name and e-mail addresses. Recording your own: set `SessionOptions.recordDirectory`, run the
+conversation against the real CLI, and scrub the same fields before committing.
 
 ## Naming
 

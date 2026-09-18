@@ -3,7 +3,7 @@
   "claude_code_version": "2.1.271",
   "recorded": "2026-09-15",
   "recorder": "kyb probe image-paste (SessionOptions.recordDirectory), haiku, --no-session-persistence",
-  "cwd_placeholder": "/Users/USER/Developer/Kyberna",
+  "cwd_placeholder": "/Users/USER/project",
   "description": "A user message whose content is an array: a text block and an image block {type:image, source:{type:base64, media_type:image/png, data}} carrying a 64x64 red PNG. The CLI accepts it, the echoed user line carries the same blocks, and the model answers 'Red'. Backlog 19.",
   "scrubbed": ["home directory -> /Users/USER", "macOS username -> USER"]
 }
