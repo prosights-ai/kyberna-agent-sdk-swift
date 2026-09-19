@@ -15,7 +15,7 @@ PATH, or a path you give the session). Zero non-Apple dependencies.
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/prosights-ai/kyberna-agent-sdk-swift", from: "0.1.0"),
+    .package(url: "https://github.com/prosights-ai/kyberna-agent-sdk-swift", from: "0.2.0"),
 ],
 targets: [
     .target(name: "MyAgent", dependencies: [
@@ -71,6 +71,7 @@ your product may use is a question for Anthropic's documentation and terms, not 
 | SDK | Recorded and tested against | Minimum |
 |---|---|---|
 | 0.1.0 | Claude Code 2.1.270, 2.1.271, 2.1.272, 2.1.273 | 2.0.0 |
+| 0.2.0 | Claude Code 2.1.270, 2.1.271, 2.1.272, 2.1.273, 2.1.278 | 2.0.0 |
 
 At start the session runs `claude --version`: below `SessionOptions.minimumClaudeCodeVersion` it sets
 `versionWarning` and continues; when `allowedClaudeCodeVersions` is set, any other version throws before anything

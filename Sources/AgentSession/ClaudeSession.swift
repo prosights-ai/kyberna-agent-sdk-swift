@@ -12,7 +12,8 @@ public enum StopSeverity: Sendable { case turn, session, kill }
 /// mutable state (waiters, pause flag, ids) is guarded by `lock` via `withLock`; callers on any executor may
 /// send, steer, pause, or stop. A host that needs one long-lived owner per session wraps this in an actor.
 public final class ClaudeSession: @unchecked Sendable {
-    public let options: SessionOptions
+    /// Fixed once `start()` runs; until then `configure(_:)` may change it (the engine layer's capabilities do).
+    public private(set) var options: SessionOptions
     public let messages: AsyncStream<Message>
     public private(set) var sessionId: String?
     public private(set) var initializeResponse: JSONValue = .null
@@ -52,6 +53,19 @@ public final class ClaudeSession: @unchecked Sendable {
 
     private func withLock<T>(_ body: () -> T) -> T { lock.lock(); defer { lock.unlock() }; return body() }
 
+    /// True once `start()` has been called, whether or not the process is still running.
+    public var isStarted: Bool { withLock { started } }
+
+    /// Changes the options before the process launches. Returns false, and changes nothing, once `start()` has
+    /// run: the argument list and environment are built from the options at that moment and cannot be revised.
+    @discardableResult
+    public func configure(_ change: (inout SessionOptions) -> Void) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if started { return false }
+        change(&options)
+        return true
+    }
+
     static func dotted(_ v: [Int]) -> String { v.map(String.init).joined(separator: ".") }
 
     /// The environment the CLI child receives. Allowlisted inherited keys, the SDK's own markers, the update
@@ -62,6 +76,8 @@ public final class ClaudeSession: @unchecked Sendable {
         env["CLAUDE_CODE_ENTRYPOINT"] = "sdk-swift"
         if options.disableUpdates { env["DISABLE_AUTOUPDATER"] = "1"; env["DISABLE_UPDATES"] = "1" }
         if options.enableFileCheckpointing { env["CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING"] = "true" }
+        if let ms = options.mcpStartupWaitMs { env["CLAUDE_CODE_MCP_STARTUP_WAIT_MS"] = String(ms) }
+        if options.emitStartupTiming { env["CLAUDE_CODE_EMIT_STARTUP_TIMING"] = "1" }
         options.env.forEach { env[$0.key] = $0.value }
         return env
     }
@@ -98,6 +114,9 @@ public final class ClaudeSession: @unchecked Sendable {
         transport = t
         try t.start()
         initializeResponse = try await sendControl(buildInitializeRequest(), timeout: options.initializeTimeout)
+        // The version check's verdict reaches a host that only sees the stream (an engine host), not just one
+        // that reads `versionWarning` (2026-09-19, ADR 0015 refactor).
+        if let w = versionWarning { emit(.system(subtype: "version_warning", data: ["message": .string(w)])) }
         // Workspace trust, as the CLI does it: an untrusted directory still runs, but the CLI ignores its
         // .claude/settings.json rules. Tell the host so it can show the trust dialog (see WorkspaceTrust).
         let loadsProject = options.settingSources.map { $0.contains("project") || $0.contains("local") } ?? true
@@ -301,6 +320,7 @@ extension ClaudeSession {
         case nil: break
         }
         if let schema = o.jsonSchema { a += ["--json-schema", schema.canonicalJSON] }
+        if let snap = o.systemPromptSnapshot { a += ["--system-prompt-snapshot", snap ? "on" : "off"] }
         if o.includePartialMessages { a.append("--include-partial-messages") }
         if let t = o.thinkingDisplay { a += ["--thinking-display", t] }
         return a
@@ -310,6 +330,7 @@ extension ClaudeSession {
         let o = options; var a: [String] = []
         if o.canUseTool != nil || o.askUserQuestion != nil { a += ["--permission-prompt-tool", "stdio"] }
         if let mode = o.permissionMode { a += ["--permission-mode", mode] }
+        if let who = o.permissionPrompts { a += ["--permission-prompts", who.rawValue] }
         if o.continueConversation { a.append("--continue") }
         if let r = o.resume { a.append("--resume=\(r)") }
         if let s = o.sessionId { a.append("--session-id=\(s)") }
@@ -523,7 +544,8 @@ extension ClaudeSession {
             return .initialized(sessionId: sessionId ?? "", model: d["model"]?.stringValue ?? "", tools: d["tools"]?.arrayValue?.compactMap { $0.stringValue } ?? [], data: d)
         case "task_started": return .taskStarted(taskId: taskId ?? "", description: d["description"]?.stringValue ?? "", taskType: d["task_type"]?.stringValue)
         case "task_progress": return .taskProgress(taskId: taskId ?? "", description: d["description"]?.stringValue ?? "", lastToolName: d["last_tool_name"]?.stringValue)
-        case "task_notification": return .taskNotification(taskId: taskId ?? "", status: d["status"]?.stringValue ?? "", summary: d["summary"]?.stringValue ?? "")
+        case "task_notification": return .taskNotification(taskId: taskId ?? "", status: d["status"]?.stringValue ?? "", summary: d["summary"]?.stringValue ?? "",
+                                                           reason: d["reason"]?.stringValue.map { TaskNotificationReason(rawValue: $0) })
         case "task_updated": return .taskUpdated(taskId: taskId ?? "", status: d["patch"]?["status"]?.stringValue)
         case "permission_denied":
             return .permissionDenied(tool: d["tool_name"]?.stringValue ?? "", toolUseId: d["tool_use_id"]?.stringValue,
@@ -534,20 +556,8 @@ extension ClaudeSession {
         default: return .system(subtype: subtype, data: d)
         }
     }
-    private func parseResult(_ d: JSONValue) -> ResultMessage {
-        let deferred = d["deferred_tool_use"].flatMap { v -> DeferredToolUse? in
-            guard let id = v["id"]?.stringValue, let name = v["name"]?.stringValue else { return nil }
-            return DeferredToolUse(id: id, name: name, input: v["input"] ?? .object([:]))
-        }
-        return ResultMessage(subtype: d["subtype"]?.stringValue ?? "", isError: d["is_error"]?.boolValue ?? false,
-                             durationMs: d["duration_ms"]?.intValue ?? 0, durationApiMs: d["duration_api_ms"]?.intValue ?? 0,
-                             numTurns: d["num_turns"]?.intValue ?? 0, sessionId: d["session_id"]?.stringValue ?? "", uuid: d["uuid"]?.stringValue,
-                             stopReason: d["stop_reason"]?.stringValue, totalCostUSD: d["total_cost_usd"]?.doubleValue, usage: d["usage"],
-                             result: d["result"]?.stringValue, structuredOutput: d["structured_output"], modelUsage: d["modelUsage"],
-                             permissionDenials: d["permission_denials"]?.arrayValue, deferredToolUse: deferred,
-                             errors: d["errors"]?.arrayValue?.compactMap { $0.stringValue }, apiErrorStatus: d["api_error_status"]?.intValue,
-                             terminalReason: d["terminal_reason"]?.stringValue)
-    }
+    /// The result frame, decoded by `AgentProtocol` so the fields and their wire names live in one place.
+    private func parseResult(_ d: JSONValue) -> ResultMessage { ResultMessage(wire: d) }
 
 }
 

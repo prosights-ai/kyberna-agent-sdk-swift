@@ -2,6 +2,8 @@ import Foundation
 import AgentProtocol
 
 public enum SystemPrompt: Sendable, Equatable { case claudeCodeDefault, replace(String), append(String) }
+/// Who answers permission prompts (`--permission-prompts`). See `SessionOptions.permissionPrompts`.
+public enum PermissionPrompts: String, Sendable, Equatable, Codable { case host, none }
 public enum ThinkingOption: Sendable, Equatable { case adaptive, budget(Int), disabled }
 
 public typealias PermissionCallback = @Sendable (_ tool: String, _ input: JSONValue, _ context: PermissionContext) async -> PermissionDecision
@@ -38,6 +40,10 @@ public struct SessionOptions: Sendable {
     public var allowedTools: [String] = []
     public var disallowedTools: [String] = []
     public var permissionMode: String?
+    /// `--permission-prompts host|none` (CLI 2.1.278): who answers a permission prompt. `.none` means nobody: anything
+    /// that would prompt is denied at once with a message to the model and `canUseTool` is never called; the
+    /// permission mode still decides everything else. nil sends nothing and keeps the CLI's default (host).
+    public var permissionPrompts: PermissionPrompts?
     /// Synchronous policy consulted before any human: `.allow`/`.deny` answer immediately, `.ask` reaches `canUseTool`.
     public var policy: PolicyCallback?
     public var canUseTool: PermissionCallback?
@@ -46,6 +52,10 @@ public struct SessionOptions: Sendable {
     public var steerIntent: SteerIntentClassifier?
     // Prompting and model
     public var systemPrompt: SystemPrompt = .claudeCodeDefault
+    /// `--system-prompt-snapshot on|off` (CLI 2.1.278): `true` records the rendered system prompt on the conversation's
+    /// first request and reuses it verbatim on every later request and resume until compaction (stable prompt cache);
+    /// `false` renders it fresh each request. nil sends nothing (the CLI's default is on where recording is enabled).
+    public var systemPromptSnapshot: Bool?
     public var model: String?
     public var fallbackModel: String?
     public var effort: String?
@@ -112,6 +122,10 @@ public struct SessionOptions: Sendable {
     /// environment: a desktop-spawned shell carries `ANTHROPIC_BASE_URL` and a dozen `CLAUDE_CODE_*` variables that
     /// would change which account or endpoint the CLI talks to. Add keys here; set values explicitly in `env`.
     public var inheritedEnvironmentKeys: Set<String> = SessionOptions.defaultInheritedKeys
+    /// `CLAUDE_CODE_MCP_STARTUP_WAIT_MS`: how long the CLI waits for MCP servers at startup before reporting them.
+    public var mcpStartupWaitMs: Int?
+    /// `CLAUDE_CODE_EMIT_STARTUP_TIMING=1`: the CLI adds a `startup_timing` breakdown to `system/init` (`SystemInit.startupTiming`).
+    public var emitStartupTiming = false
     public static let defaultInheritedKeys: Set<String> = [
         "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TZ",
         "SSH_AUTH_SOCK", "XPC_FLAGS", "XPC_SERVICE_NAME", "__CF_USER_TEXT_ENCODING",

@@ -84,6 +84,11 @@ public struct PermissionContext: Sendable, Equatable {
     public var title: String?
     public var description: String?
     public var payload: ApprovalPayload
+    /// The MCP server the tool came from, when it came from one (`mcp_server` on the `can_use_tool` request and
+    /// on tool hook inputs, TypeScript SDK 0.3.274). A policy keys on `source`, not on the name or the
+    /// `mcp__<server>__` prefix. No recorded fixture carries it; every fixture permission request is for a
+    /// built-in tool.
+    public var mcpServer: MCPServerRef?
     public init(toolUseId: String?, suggestions: [JSONValue], blockedPath: String?, decisionReason: String?, title: String?, description: String?, payload: ApprovalPayload) {
         self.toolUseId = toolUseId; self.suggestions = suggestions; self.blockedPath = blockedPath; self.decisionReason = decisionReason; self.title = title; self.description = description; self.payload = payload
     }

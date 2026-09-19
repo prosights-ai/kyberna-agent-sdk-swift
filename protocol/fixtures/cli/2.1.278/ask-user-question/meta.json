@@ -1,0 +1,14 @@
+{
+  "scenario": "ask-user-question",
+  "claude_code_version": "2.1.278",
+  "recorded": "2026-09-19",
+  "recorder": "kyb record (Sources/kyb/main.swift, Scenarios.all) with ClaudeSession.recordDirectory",
+  "model": "haiku",
+  "cwd_placeholder": "/private/tmp/kyb-record-2.1.278",
+  "description": "AskUserQuestion tool used and answered via updatedInput.answers.",
+  "scrubbed": [
+    "home directory -> /Users/USER",
+    "email addresses -> user@example.com",
+    "macOS username -> USER"
+  ]
+}
