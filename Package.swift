@@ -18,6 +18,7 @@ let package = Package(
         .library(name: "AgentTransport", targets: ["AgentTransport"]),
         .library(name: "AgentSession", targets: ["AgentSession"]),
         .library(name: "AgentEngine", targets: ["AgentEngine"]),
+        .library(name: "AgentDirect", targets: ["AgentDirect"]),
         .library(name: "AgentTestKit", targets: ["AgentTestKit"]),
         .executable(name: "fake-claude", targets: ["fake-claude"]),
     ],
@@ -29,12 +30,17 @@ let package = Package(
         .target(name: "AgentTransport", dependencies: ["AgentProtocol"], swiftSettings: settings),
         // ClaudeSession: options to arguments, handshake, hooks, permissions, typed messages, stop, steer.
         .target(name: "AgentSession", dependencies: ["AgentProtocol", "AgentTransport"], swiftSettings: settings),
-        // The engine protocols and the Claude Code engine; the direct API engine arrives in a later phase.
+        // The engine protocols and the Claude Code engine.
         .target(name: "AgentEngine", dependencies: ["AgentProtocol", "AgentSession"], swiftSettings: settings),
+        // The direct API engine (plan Phase 8, ADR 0015): the ModelProvider contract, the Anthropic provider over the
+        // Messages API, the provider-neutral ToolExecutor with its process registry, and DirectAPIEngine. Apple
+        // frameworks only; the loop is always streaming.
+        .target(name: "AgentDirect", dependencies: ["AgentProtocol", "AgentSession", "AgentEngine"], swiftSettings: settings),
         // The fake CLI, and the recorded, language-neutral fixtures it replays. The fixtures live in the shared
         // SDKs/protocol folder, read by every SDK; this target copies them into its bundle at build time so a test
         // in any Swift package finds them through `Fixtures.root`.
-        .target(name: "AgentTestKit", dependencies: ["AgentProtocol"],
+        // FakeModelProvider (scripted ModelEvent streams) lives here beside the fake CLI, so it depends on AgentDirect.
+        .target(name: "AgentTestKit", dependencies: ["AgentProtocol", "AgentDirect"],
                 resources: [.copy("../../protocol/fixtures")], swiftSettings: settings),
         .executableTarget(name: "fake-claude", dependencies: ["AgentTestKit"], swiftSettings: settings),
         // Tests (Xcode's toolchain; the Command Line Tools cannot link the Testing framework)
@@ -44,6 +50,7 @@ let package = Package(
         .testTarget(name: "AgentSessionTests", dependencies: ["AgentSession", "AgentTestKit"]),
         .testTarget(name: "AgentTestKitTests", dependencies: ["AgentTestKit"]),
         .testTarget(name: "AgentEngineTests", dependencies: ["AgentEngine", "AgentSession", "AgentTestKit"]),
+        .testTarget(name: "AgentDirectTests", dependencies: ["AgentDirect", "AgentEngine", "AgentSession", "AgentTestKit"]),
     ],
     swiftLanguageModes: [.v6]
 )

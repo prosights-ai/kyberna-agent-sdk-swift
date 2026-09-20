@@ -15,7 +15,7 @@ PATH, or a path you give the session). Zero non-Apple dependencies.
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/prosights-ai/kyberna-agent-sdk-swift", from: "0.2.0"),
+    .package(url: "https://github.com/prosights-ai/kyberna-agent-sdk-swift", from: "0.3.0"),
 ],
 targets: [
     .target(name: "MyAgent", dependencies: [
@@ -25,8 +25,9 @@ targets: [
 ```
 
 Products: `AgentProtocol` (wire types), `AgentTransport` (process and framing), `AgentSession` (`ClaudeSession`,
-`SessionOptions`, `SwiftTool`), `AgentEngine` (the `AgentEngine` protocol and `ClaudeCodeEngine`), `AgentTestKit`
-(fixtures, `FakeCLIRunner`), and the `fake-claude` executable.
+`SessionOptions`, `SwiftTool`), `AgentEngine` (the `AgentEngine` protocol, its capability protocols, and `ClaudeCodeEngine`),
+`AgentDirect` (`DirectAPIEngine` over a `ModelProvider`; `AnthropicProvider` for the Messages API), `AgentTestKit`
+(fixtures, `FakeCLIRunner`, `FakeModelProvider`), and the `fake-claude` executable.
 
 ## A first agent
 
@@ -72,6 +73,7 @@ your product may use is a question for Anthropic's documentation and terms, not 
 |---|---|---|
 | 0.1.0 | Claude Code 2.1.270, 2.1.271, 2.1.272, 2.1.273 | 2.0.0 |
 | 0.2.0 | Claude Code 2.1.270, 2.1.271, 2.1.272, 2.1.273, 2.1.278 | 2.0.0 |
+| 0.3.0 | Claude Code 2.1.270, 2.1.271, 2.1.272, 2.1.273, 2.1.278; `AgentDirect` talks to the Anthropic Messages API without the CLI | 2.0.0 (CLI engine only) |
 
 At start the session runs `claude --version`: below `SessionOptions.minimumClaudeCodeVersion` it sets
 `versionWarning` and continues; when `allowedClaudeCodeVersions` is set, any other version throws before anything
