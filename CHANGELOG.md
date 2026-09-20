@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0 (2026-09-20)
+
+Minor bump: `OpenAICompatibleProvider` in `AgentDirect` (LM Studio's server, Ollama's `/v1`); additive over 0.3.0.
+
+Additive over 0.3.0 (the next tag is 0.3.1, or 0.4.0 if anything else moves; Kyberna's `Package.swift` needs that tag for `EngineChoice.server`, which today builds only with `KYBERNA_SDK_PATH=1`).
+
+`AgentDirect` gained `OpenAICompatibleProvider: ModelProvider` (2026-09-20, release plan v0.2.0 Phase 2 step 3c), `id` "openai-compatible": the Chat Completions API as LM Studio's server (lmstudio.ai/docs/developer/openai-compat) and Ollama's `/v1` endpoint (docs.ollama.com/api/openai-compatibility) document it. `POST {base}/v1/chat/completions` with `stream: true` and `stream_options.include_usage`; `data:` lines to `[DONE]`; system, user (text and `image_url` data URLs), assistant (`tool_calls` with `arguments` strings) and `tool` (`tool_call_id`) messages; `tools` as function definitions; `tool_calls` deltas assembled into `toolUse` blocks whether the name and arguments arrive in pieces (LM Studio) or whole (Ollama), with a minted id when the wire has none; `reasoning_content` or `reasoning` deltas as a thinking block; `response_format: {type: "json_schema", json_schema: {name, strict, schema}}` for `outputSchema`, repeated once as a system-prompt instruction when the server answers 400 (`structuredOutput` pins either mode; `onStructuredOutputFallback` tells the host); `finish_reason` stop/length/tool_calls/content_filter to `ModelStopReason`; `usage` from whichever chunk carries it (`prompt_tokens`, `completion_tokens`, `prompt_tokens_details.cached_tokens`); `reasoning_effort` from `effort`; a thinking budget is a `capabilityMismatch`. No key by default, `Authorization: Bearer` when `apiKey` is set. `models()` reads `GET {base}/v1/models`. Error bodies in both the object form (`error.message`, `error.type`) and LM Studio's string form. 7 tests in `AgentDirectTests` through a `URLProtocol` stub over `URLSessionStreamingClient`. `Scripts/sdk-api-check.sh`: additions only.
+
 ## 0.3.0 (2026-09-20)
 
 Minor bump: the `AgentDirect` target (direct API engine) and `FakeModelProvider` in `AgentTestKit`; additive over 0.2.0.

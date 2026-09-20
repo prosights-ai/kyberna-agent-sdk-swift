@@ -74,7 +74,8 @@ import AgentSession
         let timed = try await ctx.run(command: "sleep 20", timeout: 0.3)
         #expect(timed.timedOut); #expect(timed.signal == SIGTERM || timed.status == -1)
         #expect(registry.registeredPIDs.isEmpty)
-        let env = try await ctx.run("/usr/bin/env", [])
+        // The environment listing is longer than this context's 16-byte cap; check it through an uncapped one.
+        let env = try await ToolContext(registry: registry, toolUseId: "t2", maxOutputBytes: 65536).run("/usr/bin/env", [])
         #expect(env.stdout.contains("PATH=")); #expect(!env.stdout.contains("HOME="))
     }
 
