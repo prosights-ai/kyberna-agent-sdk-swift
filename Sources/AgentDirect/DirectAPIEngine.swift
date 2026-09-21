@@ -19,7 +19,8 @@ public struct DirectEngineOptions: Sendable {
     public var toolTimeout: TimeInterval = 30
     /// The model's context window, for `ContextReporting`.
     public var contextWindowTokens = 200_000
-    public var compaction: (any CompactionStrategy)? = SummarizingCompaction()
+    /// Compaction and tool-output spilling for this history (`Compaction.swift`); nil leaves the history to grow.
+    public var compaction: CompactionOptions?
     /// A JSON Schema the final answer must match; parsed into `ResultMessage.structuredOutput`.
     public var outputSchema: JSONValue?
     /// What `ModelSwitching.availableModels` offers; the engine does not learn this from the provider.
@@ -264,6 +265,7 @@ actor TurnRunner {
     private var queuedSteers: [String] = []
     private var paused = false
     private var pauseWaiters: [CheckedContinuation<Void, Never>] = []
+    private var compactionFailureReported = false
 
     var isRunning: Bool { turn != nil }
 
@@ -302,6 +304,35 @@ actor TurnRunner {
         turn = Task { await self.runTurn(engine: engine) }
     }
 
+    /// The compaction pass (`Compaction.swift`): when the history's estimated tokens pass the trigger, choose the
+    /// cut, summarise the middle with one model call, replace it, and emit `system/compaction`. A failed summary
+    /// call leaves the history as it is and emits `system/compaction_failed` once until a pass succeeds.
+    private func compactIfNeeded(_ compaction: CompactionOptions, options: DirectEngineOptions, engine: DirectAPIEngine) async {
+        guard let plan = Compactor.plan(history, options: compaction, window: options.contextWindowTokens) else { return }
+        let middle = history.messages[plan.middle]
+        let tokensBefore = plan.tokensBefore
+        let request = ModelRequest(model: compaction.summaryModel ?? options.model, system: [CompactionOptions.summaryPrompt],
+                                   messages: [.user(Compactor.transcript(middle))], maxTokens: compaction.summaryMaxTokens, cachesPrefix: false)
+        var summary = ""
+        do {
+            for try await event in engine.provider.stream(request) { if case .textDelta(_, let t) = event { summary += t } }
+            guard !summary.isEmpty else { throw ProviderError.invalidResponse("the summary was empty") }
+        } catch is CancellationError {
+            return
+        } catch {
+            if !compactionFailureReported {
+                compactionFailureReported = true
+                engine.emit(.system(subtype: "compaction_failed", data: ["error": .string("\(error)"), "messages": .number(Double(middle.count)), "tokensBefore": .number(Double(tokensBefore))]))
+            }
+            return
+        }
+        history = Compactor.apply(summary: summary, to: history, plan: plan)
+        compactionFailureReported = false
+        let tokensAfter = max(0, tokensBefore - plan.removed) + Compactor.estimatedTokens(history.messages[plan.headEnd])
+        engine.emit(.system(subtype: "compaction", data: ["messages": .number(Double(middle.count)), "tokensBefore": .number(Double(tokensBefore)),
+                                                          "tokensAfter": .number(Double(tokensAfter)), "keptBoundary": .number(Double(history.keptBoundary ?? 0))]))
+    }
+
     private func runTurn(engine: DirectAPIEngine) async {
         defer { turn = nil }
         let started = ContinuousClock.now
@@ -336,12 +367,8 @@ actor TurnRunner {
                     engine.emit(.result(result("error_max_turns", isError: true, errors: ["Reached \(maxTurns) model calls in one turn"])))
                     return
                 }
-                if let strategy = config.options.compaction, strategy.shouldCompact(history),
-                   let compacted = try? await strategy.compact(history, model: config.options.model, provider: engine.provider) {
-                    let before = history.messages.count
-                    history = compacted
-                    engine.emit(.system(subtype: "compacted", data: ["messages_before": .number(Double(before)), "messages_after": .number(Double(history.messages.count))]))
-                }
+                if let compaction = config.options.compaction { await compactIfNeeded(compaction, options: config.options, engine: engine) }
+                try Task.checkCancellation()
                 // The model call.
                 let request = engine.request(history: history, config: config)
                 let callStart = ContinuousClock.now
@@ -376,6 +403,10 @@ actor TurnRunner {
                     lastFingerprint = fingerprint
                     var outcomes = await engine.executor.run(calls)
                     try Task.checkCancellation()
+                    if let compaction = config.options.compaction {
+                        let directory = compaction.resolvedSpillDirectory(workingDirectory: config.options.workingDirectory)
+                        outcomes = outcomes.map { Compactor.spill($0, maxChars: compaction.maxToolResultChars, headChars: compaction.spillHeadChars, directory: directory) }
+                    }
                     if repeats >= 2 {
                         for i in outcomes.indices {
                             outcomes[i].result.content.append(.text("\n[Note: this is the same call as the previous \(repeats) turns. Change approach or answer with what you have.]"))

@@ -25,7 +25,7 @@ extension Tag { @Tag static var requiresNetwork: Self }
 }
 
 @Suite struct AnthropicProviderTests {
-    static let key = Secret("sk-ant-test-not-a-real-key")
+    static let key = Secret("test-key-not-a-real-key")
     static let request = ModelRequest(model: "claude-test", system: ["S1", "S2"], messages: [.user("hi")],
                                       tools: [ModelToolDefinition(name: "a", description: "A", inputSchema: ["type": "object"]),
                                               ModelToolDefinition(name: "b", description: "B", inputSchema: ["type": "object"], strict: true)],
@@ -53,7 +53,7 @@ extension Tag { @Tag static var requiresNetwork: Self }
         #expect(req.value(forHTTPHeaderField: "anthropic-version") == "2023-06-01")
         #expect(req.value(forHTTPHeaderField: "anthropic-beta") == "x-beta")
         #expect(req.value(forHTTPHeaderField: "content-type") == "application/json")
-        #expect(req.value(forHTTPHeaderField: "x-api-key") == "sk-ant-test-not-a-real-key")
+        #expect(req.value(forHTTPHeaderField: "x-api-key") == "test-key-not-a-real-key")
         #expect(String(describing: provider.apiKey) == "Secret(<redacted>)")
         // Sorted keys: the same request encodes to the same bytes, so the cache prefix is stable.
         let again = try provider.buildRequest(Self.request)

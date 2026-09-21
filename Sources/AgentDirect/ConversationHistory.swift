@@ -11,9 +11,13 @@ public struct ConversationHistory: Sendable, Equatable, Codable {
     public var lastContextTokens: Int
     /// Summaries applied so far, newest last, for the transcript.
     public var compactions: Int
+    /// After a compaction (`CompactionOptions`), the index of the first message kept verbatim; the compaction
+    /// message sits just before it. Nil until the first pass. Pi's `firstKeptEntryId`: the next pass summarises
+    /// from before this boundary, so what survived one pass is folded into the next summary.
+    public var keptBoundary: Int?
 
-    public init(messages: [ModelMessage] = [], lastContextTokens: Int = 0, compactions: Int = 0) {
-        self.messages = messages; self.lastContextTokens = lastContextTokens; self.compactions = compactions
+    public init(messages: [ModelMessage] = [], lastContextTokens: Int = 0, compactions: Int = 0, keptBoundary: Int? = nil) {
+        self.messages = messages; self.lastContextTokens = lastContextTokens; self.compactions = compactions; self.keptBoundary = keptBoundary
     }
 
     public mutating func append(_ message: ModelMessage) {
@@ -67,8 +71,9 @@ public struct ConversationHistory: Sendable, Equatable, Codable {
     }
 }
 
-/// Decides when and how to shrink the history (plan 9.6: prune, summarize, degrade). The default strategy is
-/// `SummarizingCompaction`; a later one can prune tool results first or use a provider's server-side compaction.
+/// The compaction contract of 0.4.0. The engine no longer calls it: compaction is `CompactionOptions` on
+/// `DirectEngineOptions.compaction` (`Compaction.swift`). Kept for source compatibility; removed at 1.0.
+@available(*, deprecated, message: "The engine compacts through CompactionOptions; see Compaction.swift.")
 public protocol CompactionStrategy: Sendable {
     func shouldCompact(_ history: ConversationHistory) -> Bool
     /// Returns the compacted history, or nil when nothing could be done (the loop then carries on unchanged).
@@ -78,6 +83,8 @@ public protocol CompactionStrategy: Sendable {
 /// Summarises the oldest turns with the same model when the last response's context passed `thresholdTokens`,
 /// keeping the most recent `keepRecentUserTurns` user turns verbatim. A failure leaves the history as it was;
 /// after `maxConsecutiveFailures` the strategy truncates without a summary (plan 9.6: degrade on failure).
+/// The 0.4.0 strategy; the engine now compacts through `CompactionOptions`. Kept for source compatibility.
+@available(*, deprecated, message: "The engine compacts through CompactionOptions; see Compaction.swift.")
 public struct SummarizingCompaction: CompactionStrategy {
     public var thresholdTokens: Int
     public var keepRecentUserTurns: Int

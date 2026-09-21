@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.0 (unreleased)
+
+Minor bump: `DirectEngineOptions.compaction` changes type from `(any CompactionStrategy)?` (default `SummarizingCompaction()`) to `CompactionOptions?` (default nil, no compaction); everything else is additive over 0.4.0.
+
+`AgentDirect` gained compaction for the engines that have none of their own (2026-09-21, Kyberna release plan v0.2.12 Phase 3 step 3; `Compaction.swift`, adapted from Pi, OpenHands and OpenCode under MIT, see Kyberna's THIRD-PARTY-NOTICES.md). `CompactionOptions`: `triggerTokens` (nil: 70 percent of `contextWindowTokens`), `keepFirst` (2), `keepRecentTokens` (nil: 25 percent of the window), `minimumProgress` (0.1) with `maxProgressRetries` (5, the kept tail scaled by 0.8 per retry), `summaryModel` (nil: the conversation's model, same provider), `summaryMaxTokens` (2,000), `maxToolResultChars` (20,000), `spillHeadChars` (2,000), `spillDirectory` (nil: `.kyberna/tool-output/` under the working directory), and the fixed `summaryPrompt`. Before a model call, when the history's estimated tokens (the provider's last usage, else four characters per token) pass the trigger, the engine cuts at the newest user message without tool results that keeps the recent budget (never inside a tool call and result pair; the head moves past a pair it would split), summarises the middle with one call, replaces it with one assistant message beginning `[compacted: N messages]`, records `ConversationHistory.keptBoundary`, and emits `Message.system(subtype: "compaction", data: [messages, tokensBefore, tokensAfter, keptBoundary])`; a repeated pass summarises from the previous boundary, so the earlier summary and what it kept fold into the next one. A failed summary call leaves the history and emits `system/compaction_failed` once until a pass succeeds. Tool output over `maxToolResultChars` is written to `<spillDirectory>/<toolUseId>.txt` and the recorded result keeps the first `spillHeadChars` plus a line naming the file and its size; a failed write leaves the result as it was. `CompactionStrategy` and `SummarizingCompaction` are deprecated and no longer called. Eleven tests in `AgentDirectTests/CompactionTests`.
+
 ## 0.4.0 (2026-09-20)
 
 Minor bump: `OpenAICompatibleProvider` in `AgentDirect` (LM Studio's server, Ollama's `/v1`); additive over 0.3.0.

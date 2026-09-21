@@ -119,6 +119,28 @@ func makeEngine(_ script: [FakeModelProvider.Turn], tools: [SwiftTool] = [Tools.
         #expect(waves == [[0, 1]])
     }
 
+    /// A local runtime reports the reused prompt prefix as `cacheReadInputTokens`, on the `started` event and again
+    /// on `finished`, or on `started` alone. The turn's result carries the sum over its model calls, so a Console
+    /// row can show what the cache served.
+    @Test func cacheReadsAreSummedIntoTheResult() async throws {
+        var call1 = FakeModelProvider.toolCalls([("t1", "mcp__kyberna__word_count", ["text": "one two three"])],
+                                                usage: ModelUsage(inputTokens: 20, outputTokens: 15, cacheReadInputTokens: 1_000))
+        call1[0] = .started(model: "fake-model", usage: ModelUsage(inputTokens: 20, cacheReadInputTokens: 1_000))
+        var call2 = FakeModelProvider.text("Three words.", usage: ModelUsage(inputTokens: 10, outputTokens: 5))
+        call2[0] = .started(model: "fake-model", usage: ModelUsage(inputTokens: 10, cacheReadInputTokens: 1_200))   // finished says nothing about the cache
+        let (engine, _) = makeEngine([.events(call1), .events(call2)])
+        let collector = MessageCollector(engine)
+        try await engine.start()
+        _ = await collector.next()
+        try await engine.send("How many words in 'one two three'?")
+        let turn = await collector.untilResult()
+        #expect(turn.assistants.map { $0.usage?["cache_read_input_tokens"]?.intValue } == [1_000, 1_200])
+        let r = try #require(turn.result)
+        #expect(r.usage?["cache_read_input_tokens"]?.intValue == 2_200)
+        #expect(r.inputTokens == 30); #expect(r.outputTokens == 20)
+        #expect(r.usage?["cache_creation_input_tokens"]?.intValue == 0)
+    }
+
     @Test func deniedToolBecomesAnErrorResultTheModelSees() async throws {
         let (engine, provider) = makeEngine([
             .events(FakeModelProvider.toolCalls([("t1", "mcp__kyberna__upper", ["text": "hi"]), ("t2", "mcp__kyberna__word_count", ["text": "a b"])])),
@@ -334,27 +356,6 @@ func makeEngine(_ script: [FakeModelProvider.Turn], tools: [SwiftTool] = [Tools.
         let r = try #require(turn.result)
         #expect(r.stopReason == "loop_detected"); #expect(r.isError); #expect(r.numTurns == 5)
         #expect(provider.requests[3].messages.last?.content[0].resultTextValue.contains("same call as the previous 2 turns") == true)
-    }
-
-    @Test func compactionReplacesTheOldestTurns() async throws {
-        struct Cut: CompactionStrategy {
-            func shouldCompact(_ h: ConversationHistory) -> Bool { h.lastContextTokens > 100 }
-            func compact(_ h: ConversationHistory, model: String, provider: any ModelProvider) async throws -> ConversationHistory? {
-                guard let cut = h.safeCutIndex(keepingRecentUserTurns: 1) else { return nil }
-                var out = h; out.replacePrefix(before: cut, withSummary: "SUMMARY "); return out
-            }
-        }
-        let big = ModelUsage(inputTokens: 500, outputTokens: 5)
-        let (engine, provider) = makeEngine([.events(FakeModelProvider.text("a", usage: big)), .events(FakeModelProvider.text("b", usage: big)), .events(FakeModelProvider.text("c"))]) {
-            $0.compaction = Cut()
-        }
-        let collector = MessageCollector(engine)
-        try await engine.start(); _ = await collector.next()
-        for p in ["one", "two", "three"] { try await engine.send(p); _ = await collector.untilResult() }
-        #expect(collector.all.systems.contains { $0.0 == "compacted" })
-        let last = provider.requests[2].messages
-        #expect(last.count == 3)   // the summary folded into "two", then b, then three
-        #expect(last[0].text == "SUMMARY two"); #expect(last[2].text == "three")
     }
 }
 
