@@ -133,6 +133,17 @@ public protocol ToolHosting: AgentEngine {
     func host(_ tools: [SwiftTool], serverName: String) throws
 }
 
+/// A `ToolHosting` engine whose hosted tools can also be served on demand by a process outside the engine
+/// (Kyberna: `kyb mcp-serve` standing in as a stdio MCP server for an ACP agent that takes no HTTP server): the
+/// MCP `tools/list` entries as the engine names them on its own wire, and one `tools/call`, gated exactly as a
+/// call the engine receives itself (policy, then the person unless the same call was just allowed) and never
+/// thrown; a refusal or a failure is an `isError` result the model reads. Nothing here is required of an engine
+/// that hosts tools in process.
+public protocol HostedToolServing: ToolHosting {
+    func hostedToolList() -> [JSONValue]
+    func callHostedTool(_ name: String, arguments: [String: JSONValue]) async -> ToolResult
+}
+
 /// An image in a user turn.
 public struct ImageAttachment: Sendable, Equatable, Codable {
     /// Base64 of the encoded image bytes.

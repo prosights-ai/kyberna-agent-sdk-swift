@@ -67,7 +67,8 @@ import AgentTestKit
         #expect(plain is PermissionGating)
         #expect(plain is ModelSwitching)
         #expect(!(plain is Resumable))
-        #expect(!(plain is ToolHosting))
+        #expect(plain is ToolHosting)   // v0.2.14 P2e: MCP pass-through
+        #expect(plain is HostedToolServing)
         #expect(!(plain is ContextReporting))
         #expect(!(plain is FileRewinding))
         #expect(!(plain is HookCapable))

@@ -31,6 +31,11 @@ public struct ACPEngineOptions: Sendable {
     /// What the client tells the agent it offers. Nothing: the engine serves no `fs/*` or `terminal/*` methods
     /// in this release, so the agent uses its own file access and shell.
     public var clientCapabilities: JSONValue = ["fs": ["readTextFile": false, "writeTextFile": false], "terminal": false]
+    /// The stdio form of the hosted-tool server for an agent whose `initialize` does not advertise
+    /// `mcpCapabilities.http` (Kyberna: `kyb mcp-serve --session ID`, a stdio MCP server that forwards to the daemon,
+    /// which answers through `HostedToolServing`). Nil leaves such an agent without the hosted tools, and the
+    /// stream says so (`system/hosted_tools_unavailable`). The endpoint's name is replaced by the `host` server name.
+    public var stdioToolServer: MCPServerEndpoint?
     public init(descriptor: ACPAgentDescriptor, workingDirectory: String, environment: [String: String]) {
         self.descriptor = descriptor; self.workingDirectory = workingDirectory; self.environment = environment
     }
@@ -60,14 +65,23 @@ public enum ACPEngineError: Error, Sendable, Equatable, CustomStringConvertible 
 /// `AskUserQuestion` round trip, so it is never called), `ModelSwitching` as a restart on the new model argument
 /// (the engine ends its child; the host, which carries the conversation, starts it again), and `Resumable` only
 /// through the `ResumableACPEngine` wrapper `make(options:)` returns for a descriptor that advertises `session/load`.
+/// `ToolHosting` and `HostedToolServing` (Kyberna release plan v0.2.14 Phase 2 step (e)): the host's `SwiftTool`s
+/// reach the agent through `mcpServers` on `session/new` as one MCP server named `serverName`, on the wire as
+/// `<serverName>_<tool>` and to the policy as `mcp__<serverName>__<tool>` (`HostedToolNaming`). The transport is
+/// a loopback streamable-HTTP server per session (`LoopbackMCPServer`: 127.0.0.1, an ephemeral port, a bearer
+/// token checked on every request, closed with the session) when the agent's `initialize` advertises
+/// `mcpCapabilities.http`, else the host's `stdioToolServer` line, else nothing and `system/hosted_tools_unavailable`.
+/// An agent's `session/request_permission` for a hosted tool is matched to the tool by `toolCallId` (the request's
+/// title is the bare wire name, the `tool_call` update's a prefixed one) and answered under the policy name; a call
+/// arriving at the server is gated again (the policy callback, then the person unless the same call was just
+/// allowed), and a refusal is an `isError` result. A refused call's `failed` update carries the refusal as its text.
 /// Absent, with the documented fallbacks: `ContextReporting`, `FileRewinding`, `HookCapable`, `EffortSetting`,
-/// `ReasoningControl`, `ImageAttaching`, `RateLimitReporting`, and `ToolHosting`, since ACP's MCP pass-through
-/// (`mcpServers` on `session/new`) is a later step; the agent runs its own tools.
+/// `ReasoningControl`, `ImageAttaching` and `RateLimitReporting`.
 ///
 /// Errors from the child after start are error results on the stream, never throws into the loop;
 /// `CancellationError` passes through. Steering has no ACP form apart from another prompt, so `steer` queues the
 /// text as the next `session/prompt` and `steerNow` cancels the running one first.
-public final class ACPEngine: AgentEngine, PermissionGating, ModelSwitching, Sendable {
+public final class ACPEngine: AgentEngine, PermissionGating, ModelSwitching, ToolHosting, HostedToolServing, Sendable {
     /// The engine for a descriptor: `ResumableACPEngine` (this engine with `Resumable` in front) when the
     /// descriptor advertises `session/load`, else this class alone.
     public static func make(options: ACPEngineOptions) -> any AgentEngine {
@@ -82,6 +96,8 @@ public final class ACPEngine: AgentEngine, PermissionGating, ModelSwitching, Sen
         var status: String
         var output: [String] = []
         var resultEmitted = false
+        /// Set when the call names a hosted tool: the tool's own name (`notes_search`).
+        var hostedTool: String?
     }
     struct Turn: Sendable {
         var number: Int
@@ -90,6 +106,8 @@ public final class ACPEngine: AgentEngine, PermissionGating, ModelSwitching, Sen
         var resultText = ""
         var toolCalls: [String: ToolCallRecord] = [:]
         var toolOrder: [String] = []
+        /// By tool call id: the reason this engine refused the call (policy or person), the failed step's text.
+        var refusals: [String: String] = [:]
         var cancelled = false
         var startedAt = Date()
         var task: Task<Void, Never>?
@@ -117,6 +135,14 @@ public final class ACPEngine: AgentEngine, PermissionGating, ModelSwitching, Sen
         var pendingPermissions: [String: PendingPermission] = [:]
         var exited: Int32?
         var exitWaiters: [CheckedContinuation<Void, Never>] = []
+        var hostedTools: [SwiftTool] = []
+        var serverName: String?
+        var toolServer: LoopbackMCPServer?
+        /// `http`, `stdio` or `none`: how the hosted tools reached the agent at start.
+        var toolTransport = "none"
+        /// Calls the permission flow allowed, by `ApprovalPayload.hash` of the policy name and arguments, so the
+        /// same call arriving at the server is not put to the person twice. Cleared at the turn's end.
+        var grants: [String: Int] = [:]
     }
 
     let state: Mutex<State>
@@ -182,7 +208,7 @@ public final class ACPEngine: AgentEngine, PermissionGating, ModelSwitching, Sen
             let initialize = try await Self.withTimeout(options.initializeTimeout, what: "initialize") {
                 try await client.request("initialize", params: ["protocolVersion": .number(Double(ACPClient.protocolVersion)),
                                                                 "clientCapabilities": options.clientCapabilities,
-                                                                "clientInfo": ["name": "kyberna-agent-sdk-swift", "version": "0.6.0"]])
+                                                                "clientInfo": ["name": "kyberna-agent-sdk-swift", "version": "0.8.0"]])
             }
             if let v = initialize["protocolVersion"]?.intValue, v != ACPClient.protocolVersion { throw ACPError.unsupportedProtocolVersion(v) }
             let loadSession = initialize["agentCapabilities"]?["loadSession"]?.boolValue ?? false
@@ -191,9 +217,11 @@ public final class ACPEngine: AgentEngine, PermissionGating, ModelSwitching, Sen
                 s.agentName = initialize["agentInfo"]?["name"]?.stringValue ?? options.descriptor.displayName
                 s.agentVersion = initialize["agentInfo"]?["version"]?.stringValue
             }
+            let httpMCP = initialize["agentCapabilities"]?["mcpCapabilities"]?["http"]?.boolValue ?? false
+            let mcpServers = await hostedToolEndpoint(httpCapable: httpMCP)
             var resumed = false
             var opened: JSONValue
-            let sessionParams: [String: JSONValue] = ["cwd": .string(options.workingDirectory), "mcpServers": []]
+            let sessionParams: [String: JSONValue] = ["cwd": .string(options.workingDirectory), "mcpServers": .array(mcpServers.map(\.wire))]
             if let previous = resumeReference, loadSession {
                 state.withLock { $0.loading = true }
                 defer { state.withLock { $0.loading = false } }
@@ -220,17 +248,19 @@ public final class ACPEngine: AgentEngine, PermissionGating, ModelSwitching, Sen
                 return ModelChoice(value: id, resolvedModel: id, displayName: m["name"]?.stringValue ?? id, description: m["description"]?.stringValue ?? "", supportedEffortLevels: [])
             }
             let current = options.model ?? opened["models"]?["currentModelId"]?.stringValue
-            let (name, version) = state.withLock { s -> (String?, String?) in
+            let (name, version, toolNames, transport) = state.withLock { s -> (String?, String?, [String], String) in
                 s.sessionId = sessionId; s.availableModels = models; s.currentModel = current
-                return (s.agentName, s.agentVersion)
+                let naming = HostedToolNaming(serverName: s.serverName ?? "")
+                return (s.agentName, s.agentVersion, s.toolTransport == "none" ? [] : s.hostedTools.map { naming.policyName($0) }, s.toolTransport)
             }
-            continuation.yield(.initialized(sessionId: sessionId, model: current ?? "default", tools: [],
+            continuation.yield(.initialized(sessionId: sessionId, model: current ?? "default", tools: toolNames,
                                             data: ["engine": "acp", "agent": .string(options.descriptor.id), "agentName": .string(name ?? ""),
                                                    "agentVersion": version.map { .string($0) } ?? .null, "protocolVersion": .number(Double(ACPClient.protocolVersion)),
                                                    "loadSession": .bool(loadSession), "resumed": .bool(resumed), "apiKeySource": "none",
-                                                   "cwd": .string(options.workingDirectory)]))
+                                                   "cwd": .string(options.workingDirectory), "mcpTransport": .string(transport), "mcpHttp": .bool(httpMCP)]))
         } catch {
             // A start that failed leaves no child behind; the host sees the throw and nothing on the stream.
+            stopToolServer()
             client.kill()
             var gone = false
             if let acp = error as? ACPError, case .exited = acp { gone = true }
@@ -279,6 +309,7 @@ public final class ACPEngine: AgentEngine, PermissionGating, ModelSwitching, Sen
             await cancelTurn()
         case .session:
             await cancelTurn()
+            defer { stopToolServer() }
             let grace = state.withLock { $0.options.exitGrace }
             client.closeInput()
             if await awaitExit(timeout: grace) { return }
@@ -289,6 +320,7 @@ public final class ACPEngine: AgentEngine, PermissionGating, ModelSwitching, Sen
         case .kill:
             client.kill()
             _ = await awaitExit(timeout: state.withLock { $0.options.exitGrace })
+            stopToolServer()
         }
     }
 
@@ -307,6 +339,121 @@ public final class ACPEngine: AgentEngine, PermissionGating, ModelSwitching, Sen
 
     /// The ACP session id to `session/load` at start; `ResumableACPEngine.resume` sets it.
     func setResumeReference(_ reference: String) throws { try beforeStart("resume") { $0.resumeReference = reference } }
+
+    // MARK: ToolHosting, HostedToolServing
+
+    public var hostedTools: [SwiftTool] { state.withLock { $0.hostedTools } }
+    /// Before start only. The tools reach the agent as one MCP server named `serverName` (see the class comment).
+    public func host(_ tools: [SwiftTool], serverName: String) throws {
+        try beforeStart("host") { s in s.hostedTools += tools; s.serverName = serverName }
+    }
+    /// `http`, `stdio` or `none` after start: how the hosted tools were offered to the agent.
+    public var hostedToolTransport: String { state.withLock { $0.toolTransport } }
+    /// The loopback server's bound port while it runs, for tests.
+    public var toolServerPort: UInt16? { state.withLock { $0.toolServer?.port } }
+
+    /// The hosted tools as MCP `tools/list` entries, under their wire names.
+    public func hostedToolList() -> [JSONValue] {
+        let (tools, naming) = state.withLock { ($0.hostedTools, HostedToolNaming(serverName: $0.serverName ?? "")) }
+        return tools.map { tool in
+            var d = tool.wire.objectValue ?? [:]
+            d["name"] = .string(naming.wireName(tool))
+            return .object(d)
+        }
+    }
+
+    /// One `tools/call` as the server receives it, by any name `HostedToolNaming.tool(matching:)` reads. The policy
+    /// callback first (a deny is the `isError` result and `permissionDenied` on the stream); then a grant left by the
+    /// permission flow for this exact call, else the permission handler with a `permissionRequest` on the stream;
+    /// then the tool. The tool's own throw is an `isError` result; `CancellationError` is reported as `cancelled`.
+    public func callHostedTool(_ name: String, arguments: [String: JSONValue]) async -> ToolResult {
+        let (tools, naming, policy, handler) = state.withLock { ($0.hostedTools, HostedToolNaming(serverName: $0.serverName ?? ""), $0.policy, $0.permission) }
+        guard let tool = naming.tool(matching: name, in: tools) else { return .error("Unknown tool \(name)") }
+        let policyName = naming.policyName(tool)
+        let input = JSONValue.object(arguments)
+        switch policy?(policyName, input) ?? .ask {
+        case .deny(let why):
+            continuation.yield(.permissionDenied(tool: policyName, toolUseId: nil, reasonType: "policy", reason: why))
+            return .error("\(tool.name) was refused by policy: \(why)")
+        case .allow:
+            break
+        case .ask:
+            let payload = ApprovalPayload(tool: policyName, input: input)
+            let granted = state.withLock { s -> Bool in
+                guard let n = s.grants[payload.hash], n > 0 else { return false }
+                s.grants[payload.hash] = n - 1; return true
+            }
+            if !granted {
+                guard let handler else { return .error("\(tool.name) was refused: no permission handler") }
+                continuation.yield(.permissionRequest(payload))
+                let context = PermissionContext(toolUseId: nil, suggestions: [], blockedPath: nil, decisionReason: nil,
+                                                title: tool.name, description: "mcp", payload: payload)
+                switch await handler(policyName, input, context) {
+                case .allow: break
+                case .deny(let why, _):
+                    continuation.yield(.permissionDenied(tool: policyName, toolUseId: nil, reasonType: "person", reason: why))
+                    return .error("\(tool.name) was refused: \(why)")
+                }
+            }
+        }
+        do { return try await tool.handler(arguments) }
+        catch is CancellationError { return .error("cancelled") }
+        catch { return .error("\(error)") }
+    }
+
+    /// The `mcpServers` entries for `session/new`: the loopback HTTP server, started here, when the agent takes
+    /// HTTP; the host's stdio line otherwise; nothing (and a note on the stream) when neither applies or no tool
+    /// is hosted.
+    private func hostedToolEndpoint(httpCapable: Bool) async -> [MCPServerEndpoint] {
+        let (tools, serverName, stdio) = state.withLock { ($0.hostedTools, $0.serverName ?? "", $0.options.stdioToolServer) }
+        guard !tools.isEmpty else { return [] }
+        let names = JSONValue.array(tools.map { .string($0.name) })
+        if httpCapable {
+            let server = LoopbackMCPServer(configuration: .init(serverName: serverName,
+                                                                tools: { [weak self] in self?.hostedToolList() ?? [] },
+                                                                call: { [weak self] name, args in await self?.callHostedTool(name, arguments: args) ?? .error("the engine is gone") }))
+            do {
+                try await server.start()
+                guard let endpoint = server.endpoint(name: serverName) else { throw LoopbackMCPServer.ServerError.notStarted }
+                state.withLock { s in s.toolServer = server; s.toolTransport = "http" }
+                return [endpoint]
+            } catch {
+                // A loopback port that cannot be bound is no reason to refuse the agent: the session runs without
+                // the hosted tools and the transcript says why.
+                server.stop()
+                continuation.yield(.system(subtype: "hosted_tools_unavailable", data: ["tools": names, "reason": .string("the loopback MCP server could not start: \(error)")]))
+                return []
+            }
+        }
+        if let stdio, case let .stdio(_, command, args, env) = stdio {
+            state.withLock { $0.toolTransport = "stdio" }
+            return [.stdio(name: serverName, command: command, args: args, env: env)]
+        }
+        continuation.yield(.system(subtype: "hosted_tools_unavailable",
+                                   data: ["tools": names, "reason": .string(stdio == nil
+                                        ? "the agent does not advertise mcpCapabilities.http and no stdio server line is configured; the hosted tools do not reach it"
+                                        : "the agent does not advertise mcpCapabilities.http and the configured server line is not a stdio one")]))
+        return []
+    }
+
+    private func stopToolServer() {
+        let server = state.withLock { s -> LoopbackMCPServer? in let t = s.toolServer; s.toolServer = nil; return t }
+        server?.stop()
+    }
+
+    /// Marks a record that names a hosted tool (by its title or name) with the policy name and the tool.
+    private func resolveHosted(_ record: inout ToolCallRecord) {
+        guard record.hostedTool == nil else { return }
+        let (tools, naming) = state.withLock { ($0.hostedTools, HostedToolNaming(serverName: $0.serverName ?? "")) }
+        guard !tools.isEmpty else { return }
+        for candidate in [record.title, record.name] where !candidate.isEmpty {
+            if let tool = naming.tool(matching: candidate, in: tools) {
+                record.hostedTool = tool.name
+                record.name = naming.policyName(tool)
+                return
+            }
+        }
+    }
 
     // MARK: ModelSwitching
 
@@ -359,7 +506,7 @@ public final class ACPEngine: AgentEngine, PermissionGating, ModelSwitching, Sen
     private func finishTurn(_ number: Int, stopReason: String, error: String?) {
         guard var turn = state.withLock({ s -> Turn? in
             guard let t = s.turn, t.number == number else { return nil }
-            s.turn = nil; return t
+            s.turn = nil; s.grants.removeAll(); return t
         }) else { return }
         let (sessionId, model) = state.withLock { ($0.sessionId ?? "", $0.currentModel ?? "default") }
         flushAssistant(&turn, extra: [], stopReason: stopReason, model: model)
@@ -458,7 +605,9 @@ public final class ACPEngine: AgentEngine, PermissionGating, ModelSwitching, Sen
             break
         case "tool_call":
             guard let id = update["toolCallId"]?.stringValue else { return }
-            let record = Self.record(from: update, merging: nil)
+            let known = state.withLock { $0.turn?.toolCalls[id] }
+            var record = Self.record(from: update, merging: known)
+            resolveHosted(&record)
             let (use, done) = state.withLock { s -> (Bool, Bool) in
                 guard var t = s.turn else { return (false, false) }
                 let isNew = t.toolCalls[id] == nil
@@ -478,9 +627,11 @@ public final class ACPEngine: AgentEngine, PermissionGating, ModelSwitching, Sen
             if done { emitToolResult(id) }
         case "tool_call_update":
             guard let id = update["toolCallId"]?.stringValue else { return }
+            let known = state.withLock { $0.turn?.toolCalls[id] }
+            var merged = Self.record(from: update, merging: known)
+            resolveHosted(&merged)
             let done = state.withLock { s -> Bool in
                 guard var t = s.turn else { return false }
-                let merged = Self.record(from: update, merging: t.toolCalls[id])
                 if t.toolCalls[id] == nil { t.toolOrder.append(id); t.blockIndex += 1 }
                 t.toolCalls[id] = merged
                 s.turn = t
@@ -495,12 +646,17 @@ public final class ACPEngine: AgentEngine, PermissionGating, ModelSwitching, Sen
     }
 
     private func emitToolResult(_ id: String) {
-        guard let rec = state.withLock({ s -> ToolCallRecord? in
+        guard let (rec, refusal) = state.withLock({ s -> (ToolCallRecord, String?)? in
             guard var t = s.turn, var r = t.toolCalls[id], !r.resultEmitted else { return nil }
             r.resultEmitted = true; t.toolCalls[id] = r; s.turn = t
-            return r
+            return (r, t.refusals[id])
         }) else { return }
-        let text = rec.output.joined(separator: "\n")
+        var text = rec.output.joined(separator: "\n")
+        if rec.status == "failed", let refusal {
+            // The agent's own text for a rejection ("The user rejected this tool call.") says nothing about why;
+            // the engine's reason does, and is what the transcript shows for the failed step.
+            text = text.isEmpty || text == refusal ? refusal : "\(refusal) (agent: \(text))"
+        }
         continuation.yield(.user(UserMessage(content: [.toolResult(toolUseId: id, content: .string(text.isEmpty ? rec.status : text), isError: rec.status == "failed")])))
     }
 
@@ -526,7 +682,10 @@ public final class ACPEngine: AgentEngine, PermissionGating, ModelSwitching, Sen
                 }
             }
         }
-        if let raw = update["rawOutput"], !raw.isNull, r.output.isEmpty { r.output.append(raw.stringValue ?? raw.canonicalJSON) }
+        if let raw = update["rawOutput"], !raw.isNull, r.output.isEmpty {
+            // Copilot's failed update is `{"message": "...", "code": "rejected"}`; its text is the message.
+            r.output.append(raw.stringValue ?? raw["message"]?.stringValue ?? raw.canonicalJSON)
+        }
         return r
     }
 
@@ -560,7 +719,13 @@ public final class ACPEngine: AgentEngine, PermissionGating, ModelSwitching, Sen
         let call = request.params["toolCall"] ?? .object([:])
         let id = call["toolCallId"]?.stringValue ?? ""
         let known = state.withLock { $0.turn?.toolCalls[id] }
-        let record = Self.record(from: call, merging: known)
+        var resolved = Self.record(from: call, merging: known)
+        // A hosted tool is recognised here by the request's title (the bare wire name) when the `tool_call` update
+        // has not named it yet; a record the turn already holds takes the name, so the transcript's tool use
+        // and result read the same. An id not seen yet is left to its `tool_call`, which names the tool itself.
+        resolveHosted(&resolved)
+        let record = resolved
+        if known != nil { state.withLock { s in s.turn?.toolCalls[id] = record } }
         let options = (request.params["options"]?.arrayValue ?? []).compactMap { o -> (id: String, kind: String)? in
             guard let oid = o["optionId"]?.stringValue else { return nil }
             return (oid, o["kind"]?.stringValue ?? "")
@@ -579,10 +744,13 @@ public final class ACPEngine: AgentEngine, PermissionGating, ModelSwitching, Sen
             switch decision {
             case .allow(_, let perms):
                 let remember = (perms?.isEmpty == false)
+                // A hosted tool the agent may now call: the same call at the server runs without a second ask.
+                if record.hostedTool != nil { self.state.withLock { $0.grants[payload.hash, default: 0] += 1 } }
                 if let chosen = pick(remember ? ["allow_always", "allow_once"] : ["allow_once", "allow_always"]) {
                     client.respond(request.id, result: ["outcome": ["outcome": "selected", "optionId": .string(chosen)]])
                 } else { client.respond(request.id, result: ["outcome": ["outcome": "cancelled"]]) }
             case .deny(let why, _):
+                if !id.isEmpty { self.state.withLock { s in s.turn?.refusals[id] = why } }
                 self.continuation.yield(.permissionDenied(tool: record.name, toolUseId: id.isEmpty ? nil : id, reasonType: reasonType, reason: why))
                 if let chosen = pick(["reject_once", "reject_always"]) {
                     client.respond(request.id, result: ["outcome": ["outcome": "selected", "optionId": .string(chosen)]])
@@ -608,6 +776,7 @@ public final class ACPEngine: AgentEngine, PermissionGating, ModelSwitching, Sen
     }
 
     private func childExited(status: Int32, signal: Int32?) {
+        stopToolServer()
         let (turn, waiters) = state.withLock { s -> (Turn?, [CheckedContinuation<Void, Never>]) in
             s.exited = status
             let t = s.turn
@@ -666,7 +835,7 @@ public final class ACPEngine: AgentEngine, PermissionGating, ModelSwitching, Sen
 /// ACP session id to load at start. Should the live `initialize` answer say otherwise, the start is a fresh
 /// session and the stream says so (`system/resume_unavailable`). A wrapper rather than a subclass because a
 /// `Sendable` class is final; every other member forwards to `engine`.
-public final class ResumableACPEngine: AgentEngine, PermissionGating, ModelSwitching, Resumable, Sendable {
+public final class ResumableACPEngine: AgentEngine, PermissionGating, ModelSwitching, Resumable, ToolHosting, HostedToolServing, Sendable {
     public let engine: ACPEngine
     public init(options: ACPEngineOptions) { engine = ACPEngine(options: options) }
 
@@ -686,4 +855,8 @@ public final class ResumableACPEngine: AgentEngine, PermissionGating, ModelSwitc
     public var availableModels: [ModelChoice] { engine.availableModels }
     public func setModel(_ model: String?) async throws { try await engine.setModel(model) }
     public func resume(_ reference: String) throws { try engine.setResumeReference(reference) }
+    public var hostedTools: [SwiftTool] { engine.hostedTools }
+    public func host(_ tools: [SwiftTool], serverName: String) throws { try engine.host(tools, serverName: serverName) }
+    public func hostedToolList() -> [JSONValue] { engine.hostedToolList() }
+    public func callHostedTool(_ name: String, arguments: [String: JSONValue]) async -> ToolResult { await engine.callHostedTool(name, arguments: arguments) }
 }
