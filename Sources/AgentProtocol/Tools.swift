@@ -65,6 +65,14 @@ public struct ToolAnnotations: Sendable, Equatable {
     }
 }
 
+/// How much one call of a tool could do if it ran, as the tool itself reads its arguments (`SwiftTool.riskOfCall`).
+/// `low` reads and changes nothing outside the session; `medium` writes something the person can undo or reaches
+/// the network to read; `high` sends, deletes, escalates or writes where it matters; `unknown` is a tool saying it
+/// cannot tell for these arguments. A host's confirmation policy reads the grade; the SDK never acts on it.
+public enum ToolCallRisk: String, Sendable, Codable, CaseIterable, Equatable {
+    case unknown, low, medium, high
+}
+
 /// One clarifying question from Claude's AskUserQuestion tool.
 public struct AskQuestion: Sendable, Equatable {
     public struct Option: Sendable, Equatable { public var label: String; public var description: String; public init(label: String, description: String) { self.label = label; self.description = description } }
