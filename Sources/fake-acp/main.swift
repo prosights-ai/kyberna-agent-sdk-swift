@@ -1,0 +1,3 @@
+import AgentTestKit
+
+FakeACPMain.run()

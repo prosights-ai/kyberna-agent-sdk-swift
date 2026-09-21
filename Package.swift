@@ -19,8 +19,10 @@ let package = Package(
         .library(name: "AgentSession", targets: ["AgentSession"]),
         .library(name: "AgentEngine", targets: ["AgentEngine"]),
         .library(name: "AgentDirect", targets: ["AgentDirect"]),
+        .library(name: "AgentACP", targets: ["AgentACP"]),
         .library(name: "AgentTestKit", targets: ["AgentTestKit"]),
         .executable(name: "fake-claude", targets: ["fake-claude"]),
+        .executable(name: "fake-acp", targets: ["fake-acp"]),
     ],
     targets: [
         // Wire types only: every stream-json message, control request and response, options. Codable structs
@@ -36,6 +38,10 @@ let package = Package(
         // Messages API, the provider-neutral ToolExecutor with its process registry, and DirectAPIEngine. Apple
         // frameworks only; the loop is always streaming.
         .target(name: "AgentDirect", dependencies: ["AgentProtocol", "AgentSession", "AgentEngine"], swiftSettings: settings),
+        // The ACP engine (Kyberna release plan v0.2.12 Phase 3 step 5): a JSON-RPC 2.0 client over an agent's stdio
+        // and ACPEngine, one AgentEngine for every agent that speaks the Agent Client Protocol. AgentSession is here
+        // for the callback and option types the engine protocols are written in (PolicyCallback, StopSeverity).
+        .target(name: "AgentACP", dependencies: ["AgentProtocol", "AgentTransport", "AgentSession", "AgentEngine"], swiftSettings: settings),
         // The fake CLI, and the recorded, language-neutral fixtures it replays. The fixtures live in the shared
         // SDKs/protocol folder, read by every SDK; this target copies them into its bundle at build time so a test
         // in any Swift package finds them through `Fixtures.root`.
@@ -43,6 +49,8 @@ let package = Package(
         .target(name: "AgentTestKit", dependencies: ["AgentProtocol", "AgentDirect"],
                 resources: [.copy("../../protocol/fixtures")], swiftSettings: settings),
         .executableTarget(name: "fake-claude", dependencies: ["AgentTestKit"], swiftSettings: settings),
+        // The fake ACP agent (FakeACPAgent in AgentTestKit), the same one-line shape.
+        .executableTarget(name: "fake-acp", dependencies: ["AgentTestKit"], swiftSettings: settings),
         // Tests (Xcode's toolchain; the Command Line Tools cannot link the Testing framework)
         // AgentTestKit is a dependency only for `Fixtures.root`: the protocol tests decode every recorded
         // stdout line of every fixture set through the wire types.
@@ -51,6 +59,7 @@ let package = Package(
         .testTarget(name: "AgentTestKitTests", dependencies: ["AgentTestKit"]),
         .testTarget(name: "AgentEngineTests", dependencies: ["AgentEngine", "AgentSession", "AgentTestKit"]),
         .testTarget(name: "AgentDirectTests", dependencies: ["AgentDirect", "AgentEngine", "AgentSession", "AgentTestKit"]),
+        .testTarget(name: "AgentACPTests", dependencies: ["AgentACP", "AgentEngine", "AgentSession", "AgentTestKit"]),
     ],
     swiftLanguageModes: [.v6]
 )
