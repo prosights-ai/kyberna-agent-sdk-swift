@@ -36,6 +36,12 @@ public struct DirectEngineOptions: Sendable {
     public var cachesPrefix = true
     /// Debug assertion when a tool leaves a process outside the registry.
     public var auditsSpawnedProcesses = false
+    /// Loop detection per call (Kyberna gateway 38): a call with the same tool and arguments made this many times
+    /// in the current and the two previous turns with the same result, or an error result, is refused by the
+    /// executor with an error result the model reads (`ToolExecutor.repeatedCallLimit`); nil turns it off.
+    public var repeatedCallLimit: Int? = 3
+    /// Waves with a refusal of that kind in one turn after which the turn ends with result subtype `loop_detected`.
+    public var repeatedCallRefusals = 2
     public init(model: String) { self.model = model }
 }
 
@@ -96,6 +102,7 @@ public final class DirectAPIEngine: AgentEngine, ModelSwitching, EffortSetting, 
         await executor.register(tools, names: names)
         await executor.setTimeout(options.toolTimeout)
         await executor.setAuditsSpawnedProcesses(options.auditsSpawnedProcesses)
+        await executor.setRepeatedCallLimit(options.repeatedCallLimit)
         if let question { await executor.register([Self.askUserQuestionTool(question)]) }
         await executor.setGate(Self.gate(policy: policy, permission: permission, emit: { [continuation] in continuation.yield($0) }))
         var toolNames = names
@@ -266,6 +273,9 @@ actor TurnRunner {
     private var paused = false
     private var pauseWaiters: [CheckedContinuation<Void, Never>] = []
     private var compactionFailureReported = false
+    /// Set when a model call failed on a context overflow and the turn could not recover: the next turn compacts
+    /// before its first call, so one failed turn never poisons the next (Kyberna gateway 39).
+    private var forcedCompactionPending = false
 
     var isRunning: Bool { turn != nil }
 
@@ -283,6 +293,13 @@ actor TurnRunner {
 
     var currentHistory: ConversationHistory { history }
 
+    /// Appends and keeps the token figure current: while the provider's last count stands, what is appended is
+    /// estimated on top of it, so the compaction check after a tool wave sees the results just added.
+    private func append(_ message: ModelMessage) {
+        history.append(message)
+        if history.lastContextTokens > 0 { history.lastContextTokens += Compactor.estimatedTokens(message) }
+    }
+
     /// Interrupt: cancel the turn task (model stream and tool wave), then wait for its cleanup to finish, which
     /// includes ending registered processes, repairing history and emitting the result.
     func interrupt() async {
@@ -299,16 +316,18 @@ actor TurnRunner {
             engine.emit(.steeringQueued(text: input.text))
             return
         }
-        history.append(input)
+        append(input)
+        await engine.executor.beginTurn()
         // Returns as soon as the turn is running, like the CLI's `send`; the outcome arrives on `messages`.
         turn = Task { await self.runTurn(engine: engine) }
     }
 
-    /// The compaction pass (`Compaction.swift`): when the history's estimated tokens pass the trigger, choose the
-    /// cut, summarise the middle with one model call, replace it, and emit `system/compaction`. A failed summary
-    /// call leaves the history as it is and emits `system/compaction_failed` once until a pass succeeds.
-    private func compactIfNeeded(_ compaction: CompactionOptions, options: DirectEngineOptions, engine: DirectAPIEngine) async {
-        guard let plan = Compactor.plan(history, options: compaction, window: options.contextWindowTokens) else { return }
+    /// The compaction pass (`Compaction.swift`): when the history's estimated tokens pass the trigger (or `force`),
+    /// choose the cut, summarize the middle with one model call, replace it, and emit `system/compaction`. A failed
+    /// summary call leaves the history as it is and emits `system/compaction_failed` once until a pass succeeds.
+    /// Runs before every model call, so inside the tool loop too: the estimate grows with each tool result appended.
+    private func compactIfNeeded(_ compaction: CompactionOptions, options: DirectEngineOptions, engine: DirectAPIEngine, force: Bool = false) async {
+        guard let plan = Compactor.plan(history, options: compaction, window: options.contextWindowTokens, force: force) else { return }
         let middle = history.messages[plan.middle]
         let tokensBefore = plan.tokensBefore
         let request = ModelRequest(model: compaction.summaryModel ?? options.model, system: [CompactionOptions.summaryPrompt],
@@ -333,6 +352,21 @@ actor TurnRunner {
                                                           "tokensAfter": .number(Double(tokensAfter)), "keptBoundary": .number(Double(history.keptBoundary ?? 0))]))
     }
 
+    /// Overflow recovery (Kyberna gateway 39): a forced compaction pass when compaction is configured, then the
+    /// oldest tool results stubbed to one line until the estimate is under the trigger (70 percent of the window
+    /// when no options are set), and `system/compaction_forced` naming the reason. Runs when a model call failed on
+    /// a context overflow, at the start of the turn after one that could not recover, and when the estimate before
+    /// a call already exceeds the window.
+    private func forceFit(reason: String, options: DirectEngineOptions, engine: DirectAPIEngine) async {
+        let compaction = options.compaction ?? CompactionOptions()
+        let tokensBefore = Compactor.estimatedTokens(history)
+        if options.compaction != nil { await compactIfNeeded(compaction, options: options, engine: engine, force: true) }
+        let (stubbed, dropped) = Compactor.stubOldestToolResults(history, targetTokens: compaction.resolvedTrigger(window: options.contextWindowTokens))
+        history = stubbed
+        engine.emit(.system(subtype: "compaction_forced", data: ["reason": .string(reason), "tokensBefore": .number(Double(tokensBefore)),
+                                                                 "tokensAfter": .number(Double(Compactor.estimatedTokens(history))), "dropped": .number(Double(dropped))]))
+    }
+
     private func runTurn(engine: DirectAPIEngine) async {
         defer { turn = nil }
         let started = ContinuousClock.now
@@ -344,6 +378,8 @@ actor TurnRunner {
         var truncations = 0
         var lastFingerprint: String?
         var repeats = 0
+        var repeatRefusals = 0
+        var forcedThisTurn = false
         let sessionId = engine.snapshot().options.sessionId
 
         func result(_ subtype: String, isError: Bool = false, errors: [String]? = nil, stopReason: String? = lastStop?.wireValue) -> ResultMessage {
@@ -367,15 +403,37 @@ actor TurnRunner {
                     engine.emit(.result(result("error_max_turns", isError: true, errors: ["Reached \(maxTurns) model calls in one turn"])))
                     return
                 }
-                if let compaction = config.options.compaction { await compactIfNeeded(compaction, options: config.options, engine: engine) }
+                if forcedCompactionPending {
+                    forcedCompactionPending = false
+                    forcedThisTurn = true
+                    await forceFit(reason: "the previous turn's request overflowed the context window", options: config.options, engine: engine)
+                } else if let compaction = config.options.compaction {
+                    await compactIfNeeded(compaction, options: config.options, engine: engine)
+                }
+                // The estimate says the prompt would not fit even after the pass: drop old tool results rather than fail.
+                if Compactor.estimatedTokens(history) >= config.options.contextWindowTokens * 19 / 20, !forcedThisTurn {
+                    forcedThisTurn = true
+                    await forceFit(reason: "an estimated \(Compactor.estimatedTokens(history)) tokens against a window of \(config.options.contextWindowTokens)",
+                                   options: config.options, engine: engine)
+                }
                 try Task.checkCancellation()
                 // The model call.
                 let request = engine.request(history: history, config: config)
                 let callStart = ContinuousClock.now
                 var accumulator = ResponseAccumulator(model: config.options.model)
-                for try await event in engine.provider.stream(request) {
-                    accumulator.apply(event)
-                    if config.options.includePartialMessages { for e in ResponseAccumulator.streamEvents(for: event) { engine.emit(.streamEvent(event: e, parentToolUseId: nil)) } }
+                do {
+                    for try await event in engine.provider.stream(request) {
+                        accumulator.apply(event)
+                        if config.options.includePartialMessages { for e in ResponseAccumulator.streamEvents(for: event) { engine.emit(.streamEvent(event: e, parentToolUseId: nil)) } }
+                    }
+                } catch let e as ProviderError where e.isContextOverflow {
+                    // Gateway 39: compact and drop old tool results, then call again once; a second overflow ends the
+                    // turn and the next turn compacts before its first call.
+                    apiTime += ContinuousClock.now - callStart
+                    guard !forcedThisTurn else { forcedCompactionPending = true; throw e }
+                    forcedThisTurn = true
+                    await forceFit(reason: e.description, options: config.options, engine: engine)
+                    continue loop
                 }
                 try Task.checkCancellation()   // a cancelled iteration ends quietly; the partial response is discarded here
                 apiTime += ContinuousClock.now - callStart
@@ -383,7 +441,8 @@ actor TurnRunner {
                 guard let finished = accumulator.finished else { throw ProviderError.invalidResponse("stream ended without a stop reason") }
                 let assistant = ModelMessage(role: .assistant, content: accumulator.blocks)
                 history.append(assistant)
-                history.lastContextTokens = finished.usage.contextTokens
+                // The provider's count of what it read, plus its reply, which the next request carries.
+                history.lastContextTokens = finished.usage.contextTokens + finished.usage.outputTokens
                 engine.recordUsage(finished.usage)
                 totalUsage = totalUsage + finished.usage
                 lastStop = finished.stopReason
@@ -397,7 +456,8 @@ actor TurnRunner {
                     let calls = assistant.content.compactMap { block -> ToolCall? in
                         if case let .toolUse(id, name, input) = block { return ToolCall(id: id, name: name, input: input) }; return nil
                     }
-                    // Loop detection (plan 9.2): identical consecutive calls get feedback on the third and end the turn on the fifth.
+                    // Loop detection, wave signal (plan 9.2): an identical whole wave gets feedback on the third and
+                    // ends the turn on the fifth. The per-call signal is the executor's (gateway 38), below.
                     let fingerprint = calls.map(\.fingerprint).joined(separator: "|")
                     repeats = fingerprint == lastFingerprint ? repeats + 1 : 0
                     lastFingerprint = fingerprint
@@ -412,25 +472,38 @@ actor TurnRunner {
                             outcomes[i].result.content.append(.text("\n[Note: this is the same call as the previous \(repeats) turns. Change approach or answer with what you have.]"))
                         }
                     }
+                    // Counted per wave, so the model reads one refusal before the second ends the turn.
+                    if outcomes.contains(where: \.wasRepeatRefused) { repeatRefusals += 1 }
                     var blocks = outcomes.map(\.block)
                     let steers = takeSteers()
                     for s in steers { blocks.append(.text(s)) }
                     let user = ModelMessage(role: .user, content: blocks)
-                    history.append(user)
+                    append(user)
                     engine.emit(.user(UserMessage(uuid: UUID().uuidString, content: outcomes.map { o -> ContentBlock in
                         .toolResult(toolUseId: o.call.id, content: ToolOutcome.wireContent(o.result), isError: o.result.isError) } + steers.map { ContentBlock.text($0) })))
                     if outcomes.contains(where: \.endsTurn) {
                         engine.emit(.result(result("success", stopReason: "tool_use")))
                         return
                     }
+                    if repeatRefusals >= config.options.repeatedCallRefusals {
+                        let refused = outcomes.filter(\.wasRepeatRefused).map(\.call.name)
+                        let note = "Loop detected: the model kept repeating the same tool call (\(Set(refused).sorted().joined(separator: ", "))) with the same arguments and the same outcome after the repeat was refused \(repeatRefusals) times; the turn ended."
+                        engine.emit(.system(subtype: "loop_detected", data: ["note": .string(note), "tools": .array(Set(refused).sorted().map { .string($0) }),
+                                                                           "refusals": .number(Double(repeatRefusals)), "modelCalls": .number(Double(modelCalls))]))
+                        engine.emit(.result(result("loop_detected", isError: true, errors: [note], stopReason: "loop_detected")))
+                        return
+                    }
                     if repeats >= 4 {
-                        engine.emit(.result(result("error_during_execution", isError: true, errors: ["Loop detected: the same tool call repeated \(repeats + 1) times"], stopReason: "loop_detected")))
+                        let note = "Loop detected: the same wave of tool calls repeated \(repeats + 1) times; the turn ended."
+                        engine.emit(.system(subtype: "loop_detected", data: ["note": .string(note), "tools": .array(Set(calls.map(\.name)).sorted().map { .string($0) }),
+                                                                           "waves": .number(Double(repeats + 1)), "modelCalls": .number(Double(modelCalls))]))
+                        engine.emit(.result(result("loop_detected", isError: true, errors: [note], stopReason: "loop_detected")))
                         return
                     }
                     continue loop
                 case .maxTokens where truncations < config.options.maxTokensRecoveries:
                     truncations += 1
-                    history.append(.user("Your previous reply was cut off by the output limit. Continue exactly where you left off without repeating."))
+                    append(.user("Your previous reply was cut off by the output limit. Continue exactly where you left off without repeating."))
                     continue loop
                 case .refusal:
                     engine.emit(.system(subtype: "refusal", data: ["category": finished.stopDetails?.category.map { .string($0) } ?? .null,
@@ -442,7 +515,7 @@ actor TurnRunner {
                     let steers = takeSteers()
                     if !steers.isEmpty {
                         // Queued steering with no tool wave to ride on: deliver it as the next request (plan 9.2).
-                        history.append(ModelMessage(role: .user, content: steers.map { .text($0) }))
+                        append(ModelMessage(role: .user, content: steers.map { .text($0) }))
                         continue loop
                     }
                     engine.emit(.result(result("success")))

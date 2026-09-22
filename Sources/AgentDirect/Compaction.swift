@@ -94,13 +94,14 @@ enum Compactor {
         return i
     }
 
-    /// The index of the first kept message: the newest safe cut (a user message without tool results, after the
-    /// head) that keeps at least `keepRecentTokens` after it, else the oldest safe cut after the head, else nil
-    /// when there is nothing to summarise. A cut there never separates a `tool_use` from its `tool_result`, since
-    /// every result sits in the user message right after its call.
+    /// The index of the first kept message: the newest cut (a user message without tool results, or the boundary
+    /// between two tool waves; `ConversationHistory.compactionCutIndices`) after the head that keeps at least
+    /// `keepRecentTokens` after it, else the oldest such cut after the head, else nil when there is nothing to
+    /// summarize. A cut there never separates a `tool_use` from its `tool_result`, since every result sits in the
+    /// user message right after its call.
     static func cut(_ history: ConversationHistory, headEnd: Int, keepRecentTokens: Int) -> Int? {
         let messages = history.messages
-        let candidates = history.safeCutIndices.filter { $0 > headEnd }
+        let candidates = history.compactionCutIndices.filter { $0 > headEnd }
         guard let oldest = candidates.first else { return nil }
         var kept = 0
         for i in stride(from: messages.count - 1, through: oldest, by: -1) {
@@ -125,9 +126,9 @@ enum Compactor {
     /// Nil when the history is under the trigger or has nothing to summarise. Otherwise the cut, retried with the
     /// kept tail scaled by 0.8 while the pass would remove less than `minimumProgress` of the tokens (OpenHands'
     /// hard-reset scaling), up to `maxProgressRetries` times; the last attempt stands.
-    static func plan(_ history: ConversationHistory, options: CompactionOptions, window: Int) -> Plan? {
+    static func plan(_ history: ConversationHistory, options: CompactionOptions, window: Int, force: Bool = false) -> Plan? {
         let tokensBefore = estimatedTokens(history)
-        guard tokensBefore > options.resolvedTrigger(window: window) else { return nil }
+        guard force || tokensBefore > options.resolvedTrigger(window: window) else { return nil }
         let headEnd = headEnd(history, keepFirst: max(0, options.keepFirst))
         var keepRecent = options.resolvedKeepRecent(window: window)
         var plan: Plan?
@@ -171,8 +172,44 @@ enum Compactor {
         let messages = history.messages
         let head = Array(messages[..<plan.headEnd])
         let marker = ModelMessage(role: .assistant, content: [.text("\(markerPrefix)\(plan.middle.count) messages]\n\(summary)")])
-        return ConversationHistory(messages: head + [marker] + Array(messages[plan.cut...]), lastContextTokens: 0,
-                                   compactions: history.compactions + 1, keptBoundary: head.count + 1)
+        // A cut between two tool waves leaves the tail starting with an assistant message; one user line between
+        // the marker and it keeps the roles alternating for servers that refuse two assistant turns in a row.
+        let bridge: [ModelMessage] = messages[plan.cut].role == .assistant ? [.user(bridgeText)] : []
+        return ConversationHistory(messages: head + [marker] + bridge + Array(messages[plan.cut...]), lastContextTokens: 0,
+                                   compactions: history.compactions + 1, keptBoundary: head.count + 1 + bridge.count)
+    }
+
+    static let bridgeText = "[compacted: the turn continues below from its later tool calls]"
+
+    /// The stub that replaces a dropped tool result (Kyberna gateway 39).
+    static func stubText(characters: Int) -> String { "[tool result dropped to fit the context window: \(characters) characters]" }
+    static let stubPrefix = "[tool result dropped to fit the context window"
+
+    /// Replaces the oldest tool results with a one-line stub, oldest first, until the history's estimate is at or
+    /// under `targetTokens`, leaving the newest wave (the results the model is about to read) alone. Returns the
+    /// history and how many results were stubbed; `lastContextTokens` is lowered by what was removed. Nothing to
+    /// stub, or already under the target, returns the history as it was with a zero count.
+    static func stubOldestToolResults(_ history: ConversationHistory, targetTokens: Int) -> (ConversationHistory, dropped: Int) {
+        var out = history
+        var tokens = estimatedTokens(history)
+        var dropped = 0
+        guard tokens > targetTokens, let newestWave = out.messages.lastIndex(where: \.hasToolResults) else { return (history, 0) }
+        for i in out.messages.indices where i < newestWave && out.messages[i].hasToolResults {
+            for j in out.messages[i].content.indices {
+                guard tokens > targetTokens, case .toolResult(let id, let content, let isError) = out.messages[i].content[j] else { continue }
+                let text = flatten(content)
+                guard !text.hasPrefix(stubPrefix) else { continue }
+                let stub = stubText(characters: text.count)
+                guard text.utf8.count > stub.utf8.count else { continue }
+                out.messages[i].content[j] = .toolResult(toolUseId: id, content: .string(stub), isError: isError)
+                let saved = (text.utf8.count - stub.utf8.count) / charactersPerToken
+                tokens -= saved
+                if out.lastContextTokens > 0 { out.lastContextTokens = max(0, out.lastContextTokens - saved) }
+                dropped += 1
+            }
+            if tokens <= targetTokens { break }
+        }
+        return (out, dropped)
     }
 
     /// Spills text past `maxChars` to `<directory>/<toolUseId>.txt` and returns the outcome with the head and a

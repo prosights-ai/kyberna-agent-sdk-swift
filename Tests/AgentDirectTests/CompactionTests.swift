@@ -33,7 +33,7 @@ import AgentTestKit
         let h = ConversationHistory(messages: [.user("one!"), .assistant("aaaa"), .user("two!")] + Self.toolPair("t") + [.assistant("cccc"), .user("thr!"), .assistant("dddd"), .user("for!")])
         #expect(h.safeCutIndices == [2, 6, 8])
         #expect(Compactor.cut(h, headEnd: 2, keepRecentTokens: 1) == 8)
-        #expect(Compactor.cut(h, headEnd: 2, keepRecentTokens: 1_000) == 6)   // nothing keeps that much: the oldest cut after the head
+        #expect(Compactor.cut(h, headEnd: 2, keepRecentTokens: 1_000) == 5)   // nothing keeps that much: the oldest cut after the head, here the wave boundary after the tool pair
         #expect(Compactor.cut(h, headEnd: 8, keepRecentTokens: 1) == nil)
         for keep in [1, 2, 3, 5, 50] { #expect(Compactor.cut(h, headEnd: 2, keepRecentTokens: keep) != 4) }
     }
@@ -97,7 +97,8 @@ import AgentTestKit
         #expect(history.keptBoundary == 3); #expect(history.compactions == 1)
 
         let report = try #require(collector.all.systems.first { $0.0 == "compaction" })
-        #expect(report.1["messages"]?.intValue == 2); #expect(report.1["tokensBefore"]?.intValue == 500)
+        // 500 from the provider, plus its 5 output tokens and the estimate of the prompt appended since.
+        #expect(report.1["messages"]?.intValue == 2); #expect((500..<520).contains(report.1["tokensBefore"]?.intValue ?? 0))
         #expect((report.1["tokensAfter"]?.intValue ?? 999) < 500)
         #expect(!collector.all.systems.contains { $0.0 == "compaction_failed" })
     }

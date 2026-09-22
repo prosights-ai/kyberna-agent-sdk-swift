@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import Synchronization
 import AgentProtocol
 import AgentSession
 import AgentEngine
@@ -38,6 +39,9 @@ enum Tools {
     }
     static let upper = try! SwiftTool(name: "upper", description: "Uppercases.", inputSchema: ["type": "object", "properties": ["text": ["type": "string"]]],
                                       annotations: ToolAnnotations(readOnlyHint: true)) { input in (input["text"]?.stringValue ?? "").uppercased() }
+    /// Returns `n` characters, for histories of a known size.
+    static let pad = try! SwiftTool(name: "pad", description: "Pads.", inputSchema: ["type": "object", "properties": ["n": ["type": "integer"]], "required": ["n"]],
+                                    annotations: ToolAnnotations(readOnlyHint: true)) { input in String(repeating: "x", count: input["n"]?.intValue ?? 0) }
     static let failing = try! SwiftTool(name: "failing", description: "Throws.", inputSchema: ["type": "object", "properties": [:]]) { _ -> String in
         struct Boom: Error {}; throw Boom()
     }
@@ -354,10 +358,143 @@ func makeEngine(_ script: [FakeModelProvider.Turn], tools: [SwiftTool] = [Tools.
         try await engine.send("loop")
         let turn = await collector.untilResult()
         let r = try #require(turn.result)
-        #expect(r.stopReason == "loop_detected"); #expect(r.isError); #expect(r.numTurns == 5)
+        #expect(r.stopReason == "loop_detected"); #expect(r.subtype == "loop_detected"); #expect(r.isError); #expect(r.numTurns == 5)
+        // The wave signal's note on the third identical wave; the per-call refusal from the fourth (three runs made).
         #expect(provider.requests[3].messages.last?.content[0].resultTextValue.contains("same call as the previous 2 turns") == true)
+        #expect(provider.requests[4].messages.last?.content[0].resultTextValue.contains("already made 3 times") == true)
+        #expect(turn.systems.contains { $0.0 == "loop_detected" })
+    }
+
+    /// Gateway 38: one call, then five identical ones, repeated (1 5 5 5 …) never repeats a whole wave, so the wave
+    /// signal never fired and the certification run made the same `file_glob` call 221 times. Per call: the third
+    /// identical call in a wave is refused, the next wave with a refusal ends the turn.
+    @Test func alternatingWaveSizesStopWithinBudget() async throws {
+        let one = FakeModelProvider.toolCalls([("a", "mcp__kyberna__upper", [:])])
+        let five = FakeModelProvider.toolCalls((0..<5).map { ("b\($0)", "mcp__kyberna__upper", [:]) })
+        var script: [FakeModelProvider.Turn] = []
+        for _ in 0..<5 { script += [.events(one), .events(five), .events(five), .events(five)] }
+        let (engine, provider) = makeEngine(script)
+        let collector = MessageCollector(engine)
+        try await engine.start(); _ = await collector.next()
+        try await engine.send("glob everything")
+        let turn = await collector.untilResult()
+        let r = try #require(turn.result)
+        #expect(r.subtype == "loop_detected"); #expect(r.stopReason == "loop_detected"); #expect(r.isError)
+        #expect(r.numTurns <= 4); #expect(provider.requests.count == r.numTurns)
+        // Wave 2: two of the five ran (three runs in all), three were refused with the count and the arguments named.
+        let wave2 = turn.users[1].content
+        #expect(wave2.filter(\.isErrorResult).count == 3)
+        let refusal = wave2.last?.resultText ?? ""
+        #expect(refusal.contains("already made 3 times")); #expect(refusal.contains("Nothing differed")); #expect(refusal.contains("{}"))
+        // Wave 3: every call refused; the second wave with a refusal ends the turn.
+        #expect(turn.users[2].content.filter(\.isErrorResult).count == 5)
+        let note = try #require(turn.systems.first { $0.0 == "loop_detected" })
+        #expect(note.1["tools"] == ["mcp__kyberna__upper"]); #expect(note.1["refusals"]?.intValue == 2)
+        #expect(r.errors?.first?.contains("mcp__kyberna__upper") == true)
+        // Every tool_use in the history has its result: the refusals are results too.
+        let history = await engine.testHistory()
+        #expect(history.pendingToolUseIds.isEmpty)
+    }
+
+    /// The per-call signal reads outcomes: a call whose result changes each time is not a loop.
+    @Test func aCallWithChangingResultsIsNotRefused() async throws {
+        let counter = Mutex(0)
+        let clock = try! SwiftTool(name: "clock", description: "Ticks.", inputSchema: ["type": "object", "properties": [:]],
+                                   annotations: ToolAnnotations(readOnlyHint: true)) { _ in counter.withLock { $0 += 1; return "\($0)" } }
+        let tick = FakeModelProvider.toolCalls([("t", "mcp__kyberna__clock", [:])])
+        let (engine, _) = makeEngine((0..<3).map { _ in .events(tick) } + [.events(FakeModelProvider.text("done"))], tools: [clock]) {
+            $0.repeatedCallLimit = 2
+        }
+        let collector = MessageCollector(engine)
+        try await engine.start(); _ = await collector.next()
+        try await engine.send("tick")
+        let turn = await collector.untilResult()
+        #expect(turn.result?.subtype == "success"); #expect(turn.result?.numTurns == 4)
+        #expect(turn.users.flatMap(\.content).filter(\.isErrorResult).isEmpty)
+    }
+
+    /// Gateway 39: a single turn of tool waves has no user message to cut at, so compaction never ran and the
+    /// context overflowed. The boundary between two waves is a cut now, checked after each wave's results are
+    /// appended; the summarised pair goes, the newest wave stays whole, and a user line bridges the marker to it.
+    @Test func aTurnOfManyToolCallsCompactsInsideTheLoop() async throws {
+        let big = FakeModelProvider.toolCalls([("a", "mcp__kyberna__pad", ["n": 1_200])])
+        let big2 = FakeModelProvider.toolCalls([("b", "mcp__kyberna__pad", ["n": 1_201])])
+        let (engine, provider) = makeEngine([.events(big), .events(big2), .respond { _ in FakeModelProvider.text("S1") }, .events(FakeModelProvider.text("done"))],
+                                            tools: [Tools.pad]) {
+            $0.contextWindowTokens = 1_000
+            var c = CompactionOptions(); c.triggerTokens = 300; c.keepRecentTokens = 100; c.keepFirst = 1
+            $0.compaction = c
+        }
+        let collector = MessageCollector(engine)
+        try await engine.start(); _ = await collector.next()
+        try await engine.send("go")
+        let turn = await collector.untilResult()
+        #expect(turn.result?.subtype == "success"); #expect(turn.result?.result == "done")
+        // Requests: wave a, wave b, the summary, the final answer.
+        #expect(provider.requests.count == 4)
+        #expect(provider.requests[2].system == [CompactionOptions.summaryPrompt])
+        let after = provider.requests[3].messages
+        #expect(after.count == 5)
+        #expect(after.map(\.role) == [.user, .assistant, .user, .assistant, .user])
+        #expect(after[1].text.hasPrefix("[compacted: 2 messages]")); #expect(after[2].text == Compactor.bridgeText)
+        #expect(after[3].toolUseIds == ["b"]); #expect(after[4].toolResultIds == ["b"])
+        let report = try #require(turn.systems.first { $0.0 == "compaction" })
+        #expect(report.1["messages"]?.intValue == 2)
+    }
+
+    /// Gateway 39: when the estimate before a call already exceeds the window, the oldest tool results become a
+    /// one-line stub (the newest wave is left alone) and the turn goes on.
+    @Test func anOversizedPromptDropsOldToolResultsBeforeTheCall() async throws {
+        let read = ModelUsage(inputTokens: 1_000, outputTokens: 15)
+        let waves: [FakeModelProvider.Turn] = ["a", "b", "c"].enumerated().map { i, id in
+            .events(FakeModelProvider.toolCalls([(id, "mcp__kyberna__pad", ["n": .number(Double(2_000 + i))])], usage: i == 2 ? read : ModelUsage(inputTokens: 20, outputTokens: 15)))
+        }
+        let (engine, provider) = makeEngine(waves + [.events(FakeModelProvider.text("done"))], tools: [Tools.pad]) { $0.contextWindowTokens = 1_000 }
+        let collector = MessageCollector(engine)
+        try await engine.start(); _ = await collector.next()
+        try await engine.send("go")
+        let turn = await collector.untilResult()
+        #expect(turn.result?.subtype == "success")
+        let forced = try #require(turn.systems.first { $0.0 == "compaction_forced" })
+        #expect(forced.1["dropped"]?.intValue == 2); #expect(forced.1["reason"]?.stringValue?.contains("against a window of 1000") == true)
+        let last = provider.requests[3].messages
+        #expect(last[2].content[0].resultTextValue.hasPrefix("[tool result dropped to fit the context window: 2000 characters]"))
+        #expect(last[4].content[0].resultTextValue.hasPrefix("[tool result dropped"))
+        #expect(last[6].content[0].resultTextValue.count == 2_002)
+        #expect(last[2].toolResultIds == ["a"]); #expect(last[4].toolResultIds == ["b"])
+    }
+
+    /// Gateway 39: a provider's overflow error compacts and calls again once; when that fails too the turn ends,
+    /// and the next turn compacts before its first call rather than failing the same way.
+    @Test func anOverflowErrorRecoversInTheTurnOrOnTheNext() async throws {
+        let overflow = ProviderError.capabilityMismatch("a prompt of 32796 tokens in a context of 32768")
+        let wave = FakeModelProvider.toolCalls([("a", "mcp__kyberna__pad", ["n": 400])])
+        let (engine, provider) = makeEngine([.events(wave), .failure(overflow), .events(FakeModelProvider.text("recovered")),
+                                             .failure(overflow), .failure(overflow),
+                                             .events(FakeModelProvider.text("third"))], tools: [Tools.pad]) { $0.contextWindowTokens = 1_000 }
+        let collector = MessageCollector(engine)
+        try await engine.start(); _ = await collector.next()
+        try await engine.send("one")
+        let first = await collector.untilResult()
+        #expect(first.result?.subtype == "success"); #expect(first.result?.result == "recovered")
+        #expect(first.systems.filter { $0.0 == "compaction_forced" }.count == 1)
+        #expect(first.systems.first { $0.0 == "compaction_forced" }?.1["reason"]?.stringValue?.contains("in a context of 32768") == true)
+
+        try await engine.send("two")
+        let second = await collector.untilResult()
+        #expect(second.result?.isError == true); #expect(second.result?.errors?.first?.contains("in a context of") == true)
+        #expect(second.systems.filter { $0.0 == "compaction_forced" }.count == 1)
+
+        try await engine.send("three")
+        let third = await collector.untilResult()
+        #expect(third.result?.subtype == "success"); #expect(third.result?.result == "third")
+        let forced = try #require(third.systems.first { $0.0 == "compaction_forced" })
+        #expect(forced.1["reason"]?.stringValue?.contains("previous turn") == true)
+        #expect(provider.requests.count == 6)
+        #expect(provider.requests[5].messages.last?.text.hasSuffix("three") == true)   // "two" never got its answer; the prompts merged
     }
 }
+
 
 extension ContentBlock {
     var isErrorResult: Bool { if case .toolResult(_, _, true) = self { return true }; return false }
@@ -366,7 +503,7 @@ extension ModelContentBlock {
     var isErrorResult: Bool { if case .toolResult(_, _, true) = self { return true }; return false }
     var resultTextValue: String {
         guard case .toolResult(_, let c, _) = self else { return "" }
-        return (c.arrayValue ?? []).compactMap { $0["text"]?.stringValue }.joined()
+        return c.stringValue ?? (c.arrayValue ?? []).compactMap { $0["text"]?.stringValue }.joined()
     }
 }
 

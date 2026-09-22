@@ -340,7 +340,9 @@ public struct ApprovalPayload: Sendable, Equatable, Codable {
         display = "\(tool) \(escaped)"
         hash = ApprovalPayload.fnv1a("\(tool)\n\(canonical)")
     }
-    static func fnv1a(_ s: String) -> String {
+    /// The 64-bit FNV-1a hash of `s` as lowercase hex; what `hash` is made of, shared with the direct engine's
+    /// loop detection for hashing tool results.
+    public static func fnv1a(_ s: String) -> String {
         var h: UInt64 = 0xcbf29ce484222325
         for b in s.utf8 { h ^= UInt64(b); h = h &* 0x100000001b3 }
         return String(h, radix: 16)

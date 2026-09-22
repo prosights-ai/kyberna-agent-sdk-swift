@@ -7,7 +7,8 @@ import AgentProtocol
 /// the preserved-thinking rule on current models requires.
 public struct ConversationHistory: Sendable, Equatable, Codable {
     public var messages: [ModelMessage]
-    /// Context tokens the last response reported (`ModelUsage.contextTokens`); what compaction decides on.
+    /// Context tokens the last response reported (`ModelUsage.contextTokens`) plus the engine's estimate of what
+    /// it appended since (the response itself, the tool results); what compaction decides on.
     public var lastContextTokens: Int
     /// Summaries applied so far, newest last, for the transcript.
     public var compactions: Int
@@ -52,6 +53,18 @@ public struct ConversationHistory: Sendable, Equatable, Codable {
     /// first message. Ascending.
     public var safeCutIndices: [Int] {
         messages.indices.dropFirst().filter { messages[$0].role == .user && !messages[$0].hasToolResults }
+    }
+
+    /// Where compaction may cut: the `safeCutIndices`, plus the boundary between two tool waves of one turn (an
+    /// assistant message right after a message carrying tool results). Either keeps every `tool_use` with its
+    /// `tool_result`; the second is what lets a single turn of many tool calls compact at all (Kyberna gateway 39).
+    /// Ascending.
+    public var compactionCutIndices: [Int] {
+        messages.indices.dropFirst().filter { i in
+            let m = messages[i]
+            if m.role == .user { return !m.hasToolResults }
+            return messages[i - 1].hasToolResults
+        }
     }
 
     /// The largest safe cut that keeps at least `keepRecentUserTurns` user turns after it, or nil.

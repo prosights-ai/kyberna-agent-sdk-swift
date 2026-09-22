@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import Synchronization
 import AgentProtocol
 import AgentSession
 @testable import AgentDirect
@@ -26,6 +27,37 @@ import AgentSession
         #expect(out[1].result.isError); #expect(out[1].result.content.first == .text("Unknown tool 'nope'. Available: failing, upper"))
         #expect(out[2].result.isError)
         #expect(out[3].result == .text("OK"))
+    }
+
+    @Test func argumentsOutsideTheSchemaStopTheCallBeforeTheGateAndTheHandler() async throws {
+        let mail = try SwiftTool(name: "mail_search", description: "", inputSchema: ["type": "object", "properties": [
+            "from": ["type": "string"], "subject": ["type": "string"], "since_days": ["type": "integer"], "limit": ["type": "integer"]]],
+            annotations: ToolAnnotations(readOnlyHint: true)) { _ in "ran" }
+        let e = await executor([mail, Tools.wordCount])
+        let gated = Mutex<[String]>([])
+        await e.setGate { call in gated.withLock { $0.append(call.id) }; return .allow(input: nil) }
+        let out = await e.run([
+            ToolCall(id: "1", name: "mail_search", input: ["date": "last 5 days", "mailbox": "all", "sender": "Diego", "subject": ""]),
+            ToolCall(id: "2", name: "word_count", input: [:]),
+            ToolCall(id: "3", name: "mail_search", input: ["from": "Diego", "since_days": 5]),
+            ToolCall(id: "4", name: "word_count", input: ["text": "a b", "language": "en"]),
+        ])
+        #expect(out[0].result.isError); #expect(!out[0].wasDenied)
+        #expect(out[0].result.content.first == .text("Tool 'mail_search' not run: unknown arguments date, mailbox, sender. The schema's properties are: from, limit, since_days, subject. Call it again with those names."))
+        #expect(out[1].result.content.first == .text("Tool 'word_count' not run: missing required argument text. The schema's properties are: text (required). Call it again with those names."))
+        #expect(out[2].result == .text("ran"))
+        #expect(out[3].result.content.first == .text("Tool 'word_count' not run: unknown argument language. The schema's properties are: text (required). Call it again with those names."))
+        #expect(gated.withLock { $0 } == ["3"])
+    }
+
+    @Test func schemasWithoutPropertiesOrWithAdditionalPropertiesTakeAnyKeys() throws {
+        #expect(ToolExecutor.schemaViolation(of: ["anything": 1], against: ["type": "object"]) == nil)
+        #expect(ToolExecutor.schemaViolation(of: ["anything": 1], against: ["type": "object", "properties": ["a": ["type": "string"]], "additionalProperties": true]) == nil)
+        #expect(ToolExecutor.schemaViolation(of: ["anything": 1], against: ["type": "object", "properties": ["a": ["type": "string"]], "additionalProperties": ["type": "string"]]) == nil)
+        #expect(ToolExecutor.schemaViolation(of: ["anything": 1], against: ["type": "object", "properties": ["a": ["type": "string"]], "additionalProperties": false]) != nil)
+        #expect(ToolExecutor.schemaViolation(of: [:], against: ["type": "object", "properties": [:]]) == nil)
+        #expect(ToolExecutor.schemaViolation(of: ["x": 1], against: ["type": "object", "properties": [:]]) == "unknown argument x. The tool takes no arguments. Call it again with those names.")
+        #expect(ToolExecutor.schemaViolation(of: .string("s"), against: ["type": "object"]) == "arguments must be a JSON object")
     }
 
     @Test func timeoutBoundsAToolThatNeverChecksCancellation() async {

@@ -31,10 +31,13 @@ public struct ToolOutcome: Sendable, Equatable {
     public var timedOut: Bool
     public var endsTurn: Bool
     public var duration: TimeInterval
+    /// The executor refused the call because the same call had already been made `repeatedCallLimit` times with
+    /// the same outcome (loop detection per call; the engine ends the turn after `repeatedCallRefusals` of these).
+    public var wasRepeatRefused: Bool
     public init(call: ToolCall, result: ToolResult, wasDenied: Bool = false, wasInterrupted: Bool = false, timedOut: Bool = false,
-                endsTurn: Bool = false, duration: TimeInterval = 0) {
+                endsTurn: Bool = false, duration: TimeInterval = 0, wasRepeatRefused: Bool = false) {
         self.call = call; self.result = result; self.wasDenied = wasDenied; self.wasInterrupted = wasInterrupted
-        self.timedOut = timedOut; self.endsTurn = endsTurn; self.duration = duration
+        self.timedOut = timedOut; self.endsTurn = endsTurn; self.duration = duration; self.wasRepeatRefused = wasRepeatRefused
     }
 
     /// The `tool_result` block for this outcome, content as Messages API blocks
@@ -79,7 +82,24 @@ public actor ToolExecutor {
     /// Debug builds assert when a tool returns with a child process it did not start through `ToolContext.run`.
     /// Off by default because a test process may have unrelated children; the product turns it on.
     public var auditsSpawnedProcesses = false
+    /// Loop detection per call (Kyberna gateway 38): a call (tool name and canonical arguments) that has already
+    /// run this many times in the current and the two previous turns, every time with the same result or with an
+    /// error result last, is not run again; the model gets an error result naming the count and that nothing
+    /// differed. Nil turns the check off. The shape of a wave (one call, then five identical ones) no longer matters.
+    public var repeatedCallLimit: Int? = 3
     private var tools: [String: SwiftTool] = [:]
+    private var repeats: [String: RepeatRecord] = [:]
+    private var turnIndex = 0
+
+    /// What one distinct call has produced so far.
+    struct RepeatRecord {
+        var runs = 0
+        /// Hash of the first run's result; `sameResult` holds while every run matches it.
+        var firstResultHash: String
+        var sameResult = true
+        var lastWasError = false
+        var lastTurn = 0
+    }
 
     public init(registry: ProcessRegistry = ProcessRegistry(), toolTimeout: TimeInterval = 30, maxResultChars: Int = 100_000,
                 workingDirectory: String? = nil, gate: ToolGate? = nil) {
@@ -94,7 +114,38 @@ public actor ToolExecutor {
     public func setGate(_ gate: ToolGate?) { self.gate = gate }
     public func setTimeout(_ seconds: TimeInterval) { toolTimeout = seconds }
     public func setAuditsSpawnedProcesses(_ on: Bool) { auditsSpawnedProcesses = on }
+    public func setRepeatedCallLimit(_ limit: Int?) { repeatedCallLimit = limit }
     public var registeredNames: [String] { tools.keys.sorted() }
+
+    /// Called by the engine when a user turn starts: repeat records older than two turns are forgotten, so a call
+    /// the model made three times in an earlier turn is not refused in a later one.
+    public func beginTurn() {
+        turnIndex += 1
+        repeats = repeats.filter { $0.value.lastTurn >= turnIndex - 2 }
+    }
+
+    /// The refusal for `call` when it has already run `repeatedCallLimit` times with the same outcome, else nil.
+    /// `pending` counts identical calls earlier in the same wave, which have not run yet and are taken as one more
+    /// run each with the same outcome (they are the same call at the same moment).
+    func repeatRefusal(for call: ToolCall, pending: Int = 0) -> String? {
+        guard let limit = repeatedCallLimit else { return nil }
+        let record = repeats[call.fingerprint]
+        let runs = (record?.runs ?? 0) + pending
+        guard runs >= limit, record.map({ $0.sameResult || $0.lastWasError }) ?? true else { return nil }
+        let outcome = record?.sameResult ?? true ? "the same result" : "an error"
+        return "Tool '\(call.name)' not run: this exact call was already made \(runs) times in this conversation, each time with \(outcome). "
+            + "Nothing differed between the calls; the arguments were \(call.input.canonicalJSON) every time. Change the arguments or answer with what you have."
+    }
+
+    private func recordRun(_ outcome: ToolOutcome) {
+        let hash = ApprovalPayload.fnv1a(ToolOutcome.wireContent(outcome.result).canonicalJSON)
+        var record = repeats[outcome.call.fingerprint] ?? RepeatRecord(firstResultHash: hash)
+        record.runs += 1
+        if hash != record.firstResultHash { record.sameResult = false }
+        record.lastWasError = outcome.result.isError
+        record.lastTurn = turnIndex
+        repeats[outcome.call.fingerprint] = record
+    }
 
     /// The wave partition: indices into `calls`.
     public func waves(_ calls: [ToolCall]) -> [[Int]] {
@@ -117,12 +168,29 @@ public actor ToolExecutor {
         // Gate first, serially, so approvals arrive one at a time (plan 9.4).
         var permitted: [Int: JSONValue] = [:]
         var endsTurn = false
+        var pendingRuns: [String: Int] = [:]
         for (i, call) in calls.enumerated() {
             if Task.isCancelled { break }
+            // Arguments the schema does not declare, or required ones missing, stop the call here, before the gate,
+            // so the person is never asked to approve a call that would be refused and the tool never runs on a
+            // guess (Kyberna console 100: an invented argument set sent `mail_search` into a 30 s scan).
+            if let tool = tools[call.name], let violation = Self.schemaViolation(of: call.input, against: tool.inputSchema) {
+                outcomes[i] = ToolOutcome(call: call, result: .error("Tool '\(call.name)' not run: \(violation)"))
+                recordRun(outcomes[i]!)
+                continue
+            }
+            // Loop detection per call, also before the gate: the person is never asked about a call about to be refused.
+            if let refusal = repeatRefusal(for: call, pending: pendingRuns[call.fingerprint] ?? 0) {
+                outcomes[i] = ToolOutcome(call: call, result: .error(refusal), wasRepeatRefused: true)
+                continue
+            }
             switch await gate?(call) ?? .allow(input: nil) {
-            case .allow(let updated): permitted[i] = updated ?? call.input
+            case .allow(let updated):
+                permitted[i] = updated ?? call.input
+                pendingRuns[call.fingerprint, default: 0] += 1
             case .deny(let reason, let ends):
                 outcomes[i] = ToolOutcome(call: call, result: .error("Permission denied: \(reason)"), wasDenied: true, endsTurn: ends)
+                recordRun(outcomes[i]!)
                 if ends { endsTurn = true }
             }
         }
@@ -138,7 +206,10 @@ public actor ToolExecutor {
                 for await (j, outcome) in group { collected[j] = outcome }
                 return collected
             }
-            for (j, outcome) in results { outcomes[runnable[j]] = outcome }
+            for (j, outcome) in results {
+                outcomes[runnable[j]] = outcome
+                if !outcome.wasInterrupted { recordRun(outcome) }
+            }
         }
         return calls.enumerated().map { i, call in
             if var o = outcomes[i] { o.endsTurn = o.endsTurn || endsTurn; return o }
@@ -182,6 +253,34 @@ public actor ToolExecutor {
     }
 
     struct ToolTimeout: Error {}
+
+    /// Why `input` does not fit `schema`, or nil when it does. Checked: the input is an object, every key is one of
+    /// the schema's `properties` (unless the schema sets `additionalProperties` to anything but `false`, or declares
+    /// no `properties` at all), and every `required` name is present. The sentence names the offending keys and
+    /// quotes the property list, so the model can correct the call on its next turn. Value types are the handler's
+    /// business, as before.
+    static func schemaViolation(of input: JSONValue, against schema: JSONValue) -> String? {
+        guard case .object(let object) = input else { return "arguments must be a JSON object" }
+        let declared = schema["properties"]?.objectValue.map { Array($0.keys).sorted() }
+        let required = (schema["required"]?.arrayValue ?? []).compactMap(\.stringValue)
+        let missing = required.filter { object[$0] == nil }
+        var unknown: [String] = []
+        if let declared {
+            let extras: Bool
+            switch schema["additionalProperties"] {
+            case .bool(false)?, nil: extras = false
+            default: extras = true
+            }
+            if !extras { unknown = object.keys.filter { !declared.contains($0) }.sorted() }
+        }
+        guard !missing.isEmpty || !unknown.isEmpty else { return nil }
+        var parts: [String] = []
+        if !unknown.isEmpty { parts.append("unknown argument\(unknown.count == 1 ? "" : "s") \(unknown.joined(separator: ", "))") }
+        if !missing.isEmpty { parts.append("missing required argument\(missing.count == 1 ? "" : "s") \(missing.joined(separator: ", "))") }
+        let list = (declared ?? []).map { name in required.contains(name) ? "\(name) (required)" : name }
+        let properties = list.isEmpty ? "The tool takes no arguments." : "The schema's properties are: \(list.joined(separator: ", "))."
+        return parts.joined(separator: "; ") + ". " + properties + " Call it again with those names."
+    }
 
     static func withTimeout<T: Sendable>(_ seconds: TimeInterval, _ body: @escaping @Sendable () async throws -> T) async throws -> T {
         try await withThrowingTaskGroup(of: T.self) { group in

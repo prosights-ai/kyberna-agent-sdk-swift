@@ -247,6 +247,22 @@ public enum ProviderError: Error, Sendable, Equatable, CustomStringConvertible {
         }
     }
 
+    /// The request did not fit the model's context window: the local runtimes' "a prompt of N tokens in a context
+    /// of M" (`capabilityMismatch`), or a 400 or 413 whose error names the context length (the Messages API's
+    /// "prompt is too long", OpenAI-compatible servers' `context_length_exceeded` and "maximum context length",
+    /// llama.cpp's server's "exceeds the available context size"). The engine compacts and retries on this.
+    public var isContextOverflow: Bool {
+        switch self {
+        case .capabilityMismatch(let s): return s.contains("in a context of")
+        case .http(let status, let type, let message, _):
+            guard status == 400 || status == 413 else { return false }
+            let text = "\(type ?? "") \(message ?? "")".lowercased()
+            return ["context_length", "context length", "context size", "context window", "prompt is too long", "too many tokens", "maximum context"]
+                .contains { text.contains($0) }
+        default: return false
+        }
+    }
+
     public var description: String {
         switch self {
         case let .http(status, type, message, requestId):
