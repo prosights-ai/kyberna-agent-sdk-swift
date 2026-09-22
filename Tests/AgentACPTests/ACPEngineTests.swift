@@ -333,6 +333,48 @@ import AgentTestKit
         await engine.stop(.session)
     }
 
+    /// Kyberna console 93: GitHub Copilot CLI's "Info: …/hello.txt" (a message chunk while the edit ran) and
+    /// "Done." (a chunk after it) rendered as "hello.txtDone.", one text block. The text before a tool's end is its
+    /// own assistant message, the result's content blocks are joined with a newline, and the closing chunk is a
+    /// new block, so the transcript shows the three on their own lines.
+    @Test func textAroundAToolsEndAndAMultiBlockResultKeepTheirSeparators() async throws {
+        guard let fake = Self.fakePath else { Issue.record("fake-acp not built; run `swift build --product fake-acp` first"); return }
+        var o = Self.options(fake: fake); o.includePartialMessages = true
+        let engine = ACPEngine(options: o)
+        try engine.setPolicy { _, _ in .allow }
+        let c = Collector(engine)
+        try await engine.start()
+        try await engine.send("Write hello.txt and say when it is done.")
+        let seen = await c.untilResult()
+        let assistants = seen.compactMap { if case .assistant(let a) = $0 { return a }; return nil }
+        let texts = assistants.flatMap { $0.content.compactMap { if case .text(let t) = $0 { return t }; return nil } }
+        #expect(texts == ["I will read utils.py.", "Info: /tmp/hello.txt", "Done."])
+        #expect(assistants.last?.stopReason == "end_turn")
+        let results = seen.compactMap { if case .user(let u) = $0 { return u }; return nil }
+        #expect(results.count == 1)
+        #expect(results.first?.content.first?.resultText == "wrote 6 bytes\nok")
+        // The message before the result precedes it on the stream, as it did on the agent's side.
+        let order = seen.compactMap { m -> String? in
+            if case .assistant(let a) = m, a.content.contains(.text("Info: /tmp/hello.txt")) { return "info" }
+            if case .user = m { return "result" }
+            if case .assistant(let a) = m, a.content.contains(.text("Done.")) { return "done" }
+            return nil
+        }
+        #expect(order == ["info", "result", "done"])
+        // The stream events for "Done." index a new content block, so a live view does not append it to the earlier text.
+        let indices = seen.compactMap { m -> (Int, String)? in
+            guard case .streamEvent(let e, _) = m, let text = e["delta"]?["text"]?.stringValue, let i = e["index"]?.intValue else { return nil }
+            return (i, text)
+        }
+        let infoIndex = indices.first { $0.1 == "Info: /tmp/hello.txt" }?.0
+        let doneIndex = indices.first { $0.1 == "Done." }?.0
+        #expect(infoIndex != nil && doneIndex != nil && infoIndex != doneIndex)
+        guard case .result(let r) = seen.last else { Issue.record("no result"); return }
+        #expect(r.result == "I will read utils.py.\nInfo: /tmp/hello.txt\nDone.")
+        await engine.stop(.session)
+        await c.untilExit()
+    }
+
     @Test func theRecordMergesToolCallUpdatesAndReadsContentShapes() {
         let first = ACPEngine.record(from: ["toolCallId": "t", "title": "Edit main.swift", "kind": "edit", "status": "pending"], merging: nil)
         #expect(first.name == "edit")   // no programmatic name: the kind stands in

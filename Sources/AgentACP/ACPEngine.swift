@@ -624,7 +624,7 @@ public final class ACPEngine: AgentEngine, PermissionGating, ModelSwitching, Too
                     s.turn = t
                 }
             }
-            if done { emitToolResult(id) }
+            if done { emitToolResult(id, model: model) }
         case "tool_call_update":
             guard let id = update["toolCallId"]?.stringValue else { return }
             let known = state.withLock { $0.turn?.toolCalls[id] }
@@ -637,7 +637,7 @@ public final class ACPEngine: AgentEngine, PermissionGating, ModelSwitching, Too
                 s.turn = t
                 return merged.status == "completed" || merged.status == "failed"
             }
-            if done { emitToolResult(id) }
+            if done { emitToolResult(id, model: model) }
         case "plan":
             continuation.yield(.system(subtype: "plan", data: ["entries": update["entries"] ?? .array([])]))
         default:
@@ -645,10 +645,19 @@ public final class ACPEngine: AgentEngine, PermissionGating, ModelSwitching, Too
         }
     }
 
-    private func emitToolResult(_ id: String) {
+    /// The tool's result as one `user` message, its content blocks joined with a newline (Kyberna console 93). Text
+    /// the agent wrote while the call ran ("Info: …/hello.txt", which GitHub Copilot CLI sends as a message chunk
+    /// before the `completed` update) goes out first as its own assistant message, so what the agent says after
+    /// the result ("Done.") starts a new block instead of running on from the earlier text without a separator.
+    private func emitToolResult(_ id: String, model: String) {
         guard let (rec, refusal) = state.withLock({ s -> (ToolCallRecord, String?)? in
             guard var t = s.turn, var r = t.toolCalls[id], !r.resultEmitted else { return nil }
             r.resultEmitted = true; t.toolCalls[id] = r; s.turn = t
+            if !t.text.isEmpty || !t.thinking.isEmpty {
+                flushAssistant(&t, extra: [], stopReason: nil, model: model)
+                t.blockIndex += 1
+                s.turn = t
+            }
             return (r, t.refusals[id])
         }) else { return }
         var text = rec.output.joined(separator: "\n")

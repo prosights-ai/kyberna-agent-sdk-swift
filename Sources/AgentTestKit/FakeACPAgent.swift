@@ -4,7 +4,9 @@ import AgentProtocol
 /// A scripted ACP agent (agentclientprotocol.com, protocol version 1) for tests of `ACPEngine`, the way
 /// fake-claude stands in for the CLI. `initialize`, `session/new`, `session/load` (when `loadSession` is set),
 /// and one prompt scenario: a thought, a message, a `tool_call`, a `session/request_permission` the client
-/// answers, the tool's end, a closing message and `end_turn`. A prompt containing `fail` is answered with a
+/// answers, the tool's end, a closing message and `end_turn`; a prompt naming `hello.txt` ends the call the way
+/// GitHub Copilot CLI does (a message chunk while the call runs, a `completed` update with two content blocks, a
+/// closing chunk). A prompt containing `fail` is answered with a
 /// JSON-RPC error; one containing `sleep` runs until `session/cancel` and ends `cancelled`; `--model NAME` on
 /// the command line becomes the session's `currentModelId`, so a test sees the model argument arrive.
 ///
@@ -131,7 +133,16 @@ public final class FakeACPAgent {
             update(["sessionUpdate": "tool_call_update", "toolCallId": "call-1", "status": "failed"])
             respond(id, ["stopReason": "cancelled"]); return
         }
-        if chosen.hasPrefix("allow") {
+        if chosen.hasPrefix("allow"), text.contains("hello.txt") {
+            // GitHub Copilot CLI's shape after an edit (Kyberna console 93): a message chunk while the call runs, a
+            // `completed` update with several content blocks, and a closing chunk after it.
+            update(["sessionUpdate": "tool_call_update", "toolCallId": "call-1", "status": "in_progress"])
+            update(["sessionUpdate": "agent_message_chunk", "content": ["type": "text", "text": "Info: /tmp/hello.txt"]])
+            update(["sessionUpdate": "tool_call_update", "toolCallId": "call-1", "status": "completed",
+                    "content": [["type": "content", "content": ["type": "text", "text": "wrote 6 bytes"]],
+                                ["type": "content", "content": ["type": "text", "text": "ok"]]]])
+            update(["sessionUpdate": "agent_message_chunk", "content": ["type": "text", "text": "Done."]])
+        } else if chosen.hasPrefix("allow") {
             update(["sessionUpdate": "tool_call_update", "toolCallId": "call-1", "status": "in_progress"])
             update(["sessionUpdate": "tool_call_update", "toolCallId": "call-1", "status": "completed",
                     "content": [["type": "content", "content": ["type": "text", "text": "def calculate_average(values):\n    return sum(values) / len(values)"]]],

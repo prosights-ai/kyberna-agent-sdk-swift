@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.0 (2026-09-21)
+
+`ACPEngine` keeps the agent's text apart from a tool's end (2026-09-21, Kyberna console 93, release plan v0.2.14 Phase 1 step 6): GitHub Copilot CLI sends "Info: …/hello.txt" as an `agent_message_chunk` while an edit runs and "Done." as another after the `completed` update, and both landed in one text block as "hello.txtDone.". When a `tool_call` or `tool_call_update` completes or fails, text and thinking buffered so far now go out first as their own `assistant` message (no `stopReason`), the tool result follows as before with its content blocks joined by a newline, and the next chunk starts a new content block (a new `index` on the stream events), so a live view does not append it to the earlier text; the turn's `result` text joins the pieces with newlines. `FakeACPAgent` plays that shape for a prompt naming `hello.txt`. One test in `AgentACPTests/ACPEngineTests`.
+
 ## 0.8.0 (2026-09-21)
 
 Minor bump: `ToolHosting` on `ACPEngine`, the `HostedToolServing` protocol and the `MCPServerEndpoint` type; additive over 0.7.0.
